@@ -8,7 +8,7 @@ import argparse
 import sys
 
 from . import __version__
-from .commands import cmd_attr, cmd_copy, cmd_create, cmd_delete, cmd_info, cmd_list, cmd_verify, print_extended_help
+from .commands import cmd_attr, cmd_copy, cmd_create, cmd_delete, cmd_info, cmd_list, cmd_mkdir, cmd_rmdir, cmd_verify, print_extended_help
 from .formatter import OutputFormatter
 from .logging_config import setup_logging, QUIET, NORMAL, VERBOSE
 
@@ -94,6 +94,18 @@ def main() -> int:
                              help='Attribute changes: +R +H +S +A to set, -R -H -S -A to clear')
     attr_parser.add_argument('--json', action='store_true', help='Output in JSON format')
 
+    # Mkdir command
+    mkdir_parser = subparsers.add_parser('mkdir', help='Create a directory on disk image')
+    mkdir_parser.add_argument('path', help='Directory path (image.img:\\DIRNAME or image.img:N:\\DIRNAME)')
+    mkdir_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+
+    # Rmdir command
+    rmdir_parser = subparsers.add_parser('rmdir', help='Remove a directory from disk image')
+    rmdir_parser.add_argument('path', help='Directory path (image.img:\\DIRNAME or image.img:N:\\DIRNAME)')
+    rmdir_parser.add_argument('-r', '--recursive', action='store_true',
+                              help='Remove directory and all contents recursively')
+    rmdir_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+
     args = parser.parse_args()
 
     # Configure logging based on verbosity flags
@@ -121,6 +133,10 @@ def main() -> int:
             return cmd_delete(args, formatter)
         case 'attr':
             return cmd_attr(args, formatter)
+        case 'mkdir':
+            return cmd_mkdir(args, formatter)
+        case 'rmdir':
+            return cmd_rmdir(args, formatter)
         case _:
             formatter.error(f"Unknown command: {args.command}")
             return 1

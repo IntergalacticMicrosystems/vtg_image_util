@@ -780,6 +780,173 @@ class FAT12Base(ABC):
         if self._fat_dirty:
             self._write_fat()
 
+    def create_directory(self, path_components: list[str]) -> None:
+        """
+        Create a directory on the disk image.
+
+        Args:
+            path_components: Path to the new directory (e.g., ['SUBDIR'] or ['DIR1', 'DIR2'])
+        """
+        if not path_components:
+            raise InvalidFilenameError("Empty path")
+
+        # Parse path - all but last component is parent directory path
+        parent_path = path_components[:-1]
+        dirname = path_components[-1]
+
+        # Validate directory name
+        name, ext = validate_filename(dirname)
+
+        # Find parent directory
+        if parent_path:
+            parent_cluster, parent_entry = self.resolve_path(parent_path)
+            if parent_entry is not None and not parent_entry.is_directory:
+                raise FileNotFoundError(f"'{parent_path[-1]}' is not a directory")
+            if parent_entry is not None:
+                parent_cluster = parent_entry.first_cluster
+        else:
+            parent_cluster = None  # Root directory
+
+        # Check if directory already exists
+        entries = self.read_directory(parent_cluster)
+        for entry in entries:
+            if entry.name == name and entry.extension == ext:
+                if entry.is_directory:
+                    return  # Directory already exists, nothing to do
+                raise DiskError(f"'{dirname}' already exists as a file")
+
+        # Allocate a cluster for the new directory
+        new_cluster = self.find_free_cluster()
+        if new_cluster is None:
+            raise DiskFullError("No free clusters for directory")
+
+        self.set_fat_entry(new_cluster, 0xFFF)  # Mark as end of chain
+
+        # Initialize directory cluster with zeros
+        first_sector = self._cluster_to_sector(new_cluster)
+        for sec_offset in range(self.sectors_per_cluster):
+            self.write_sector(first_sector + sec_offset, bytes(SECTOR_SIZE))
+
+        # Create timestamp
+        now = time.localtime()
+        date_val = ((now.tm_year - 1980) << 9) | (now.tm_mon << 5) | now.tm_mday
+        time_val = (now.tm_hour << 11) | (now.tm_min << 5) | (now.tm_sec // 2)
+
+        # Create "." entry (points to self)
+        dot_entry = DirectoryEntry(
+            name='.       ',
+            extension='   ',
+            attributes=ATTR_DIRECTORY,
+            first_cluster=new_cluster,
+            file_size=0,
+            create_time=time_val,
+            create_date=date_val,
+            modify_time=time_val,
+            modify_date=date_val
+        )
+
+        # Create ".." entry (points to parent)
+        dotdot_entry = DirectoryEntry(
+            name='..      ',
+            extension='   ',
+            attributes=ATTR_DIRECTORY,
+            first_cluster=parent_cluster or 0,  # 0 for root
+            file_size=0,
+            create_time=time_val,
+            create_date=date_val,
+            modify_time=time_val,
+            modify_date=date_val
+        )
+
+        # Write "." and ".." entries to new directory
+        sector_data = bytearray(SECTOR_SIZE)
+        sector_data[0:DIR_ENTRY_SIZE] = dot_entry.to_bytes()
+        sector_data[DIR_ENTRY_SIZE:DIR_ENTRY_SIZE * 2] = dotdot_entry.to_bytes()
+        self.write_sector(first_sector, bytes(sector_data))
+
+        # Create directory entry in parent
+        dir_entry = DirectoryEntry(
+            name=name,
+            extension=ext,
+            attributes=ATTR_DIRECTORY,
+            first_cluster=new_cluster,
+            file_size=0,
+            create_time=time_val,
+            create_date=date_val,
+            modify_time=time_val,
+            modify_date=date_val
+        )
+
+        # Find free slot in parent and write entry
+        location = self._find_free_dir_slot(parent_cluster)
+        self._write_dir_entry(location, dir_entry, parent_cluster is None)
+
+        # Write FAT to disk
+        self._write_fat()
+
+    def delete_directory(self, path_components: list[str], recursive: bool = False) -> None:
+        """
+        Delete a directory from the disk image.
+
+        Args:
+            path_components: Path to the directory
+            recursive: If True, delete contents recursively. If False, directory must be empty.
+        """
+        if not path_components:
+            raise InvalidFilenameError("Empty path")
+
+        # Find the directory
+        dir_path = path_components[:-1]
+        dirname = path_components[-1]
+
+        name, ext = validate_filename(dirname)
+
+        # Find parent directory
+        if dir_path:
+            parent_cluster, _ = self.resolve_path(dir_path)
+        else:
+            parent_cluster = None
+
+        # Find the directory entry
+        entries = self.read_directory(parent_cluster)
+        target = None
+        for entry in entries:
+            if entry.name == name and entry.extension == ext:
+                target = entry
+                break
+
+        if target is None:
+            raise FileNotFoundError(f"Directory not found: {dirname}")
+
+        if not target.is_directory:
+            raise DiskError(f"'{dirname}' is not a directory")
+
+        # Check if directory is empty (except . and ..)
+        dir_contents = self.read_directory(target.first_cluster)
+        non_dot_entries = [e for e in dir_contents if not e.is_dot_entry]
+
+        if non_dot_entries and not recursive:
+            raise DiskError(f"Directory '{dirname}' is not empty")
+
+        if recursive:
+            # Delete contents recursively
+            for entry in non_dot_entries:
+                entry_path = path_components + [entry.full_name]
+                if entry.is_directory:
+                    self.delete_directory(entry_path, recursive=True)
+                else:
+                    self.delete_file(entry_path)
+
+        # Free the directory's cluster chain
+        if target.first_cluster > 0:
+            self.free_chain(target.first_cluster)
+
+        # Mark directory entry as deleted in parent
+        self._delete_entry_by_name(parent_cluster, name, ext)
+
+        # Write FAT
+        self._write_fat()
+
 
 class DiskImageFileMixin:
     """

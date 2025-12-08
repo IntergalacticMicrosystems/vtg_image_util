@@ -102,6 +102,9 @@ vtg_image_util copy disk.img:\* ./output/ -r
 # Copy to image
 vtg_image_util copy localfile.txt disk.img:\FILE.TXT
 
+# Copy directory to image (recursive)
+vtg_image_util copy ./mydir disk.img:\MYDIR -r
+
 # Hard disk partitions
 vtg_image_util copy vichd.img:0:\FILE.COM ./
 vtg_image_util copy localfile.txt vichd.img:1:\FILE.TXT
@@ -112,6 +115,24 @@ vtg_image_util copy localfile.txt vichd.img:1:\FILE.TXT
 ```bash
 vtg_image_util delete disk.img:\FILE.COM
 vtg_image_util delete vichd.img:0:\FILE.COM
+```
+
+#### Create/Remove Directories
+
+```bash
+# Create directory
+vtg_image_util mkdir disk.img:\SUBDIR
+vtg_image_util mkdir vichd.img:0:\NEWDIR
+
+# Create nested directories
+vtg_image_util mkdir disk.img:\DIR1
+vtg_image_util mkdir disk.img:\DIR1\DIR2
+
+# Remove empty directory
+vtg_image_util rmdir disk.img:\SUBDIR
+
+# Remove directory and all contents
+vtg_image_util rmdir disk.img:\SUBDIR -r
 ```
 
 #### Create Disk Images

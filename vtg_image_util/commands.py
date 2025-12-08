@@ -170,7 +170,7 @@ def cmd_copy(args, formatter: OutputFormatter) -> int:
 
     elif source_image is None and dest_image is not None and dest_internal is not None:
         # Copy from filesystem to image
-        return copy_to_image(args.source, dest_image, dest_partition, dest_internal, formatter)
+        return copy_to_image(args.source, dest_image, dest_partition, dest_internal, formatter, recursive)
 
     else:
         formatter.error("Invalid source/destination. One must be image:path, one must be filesystem path.")
@@ -313,21 +313,25 @@ def copy_from_image(
         return 1
 
 
-def copy_to_image(source_path: str, image_path: str, partition: int | None, internal_path: str, formatter: OutputFormatter) -> int:
-    """Copy file from filesystem to disk image."""
+def copy_to_image(
+    source_path: str,
+    image_path: str,
+    partition: int | None,
+    internal_path: str,
+    formatter: OutputFormatter,
+    recursive: bool = False
+) -> int:
+    """Copy file or directory from filesystem to disk image."""
     try:
         path_components = split_internal_path(internal_path)
         if not path_components:
-            formatter.error("No destination file specified in image path")
+            formatter.error("No destination specified in image path")
             return 1
 
-        # Read source file
         source = Path(source_path)
         if not source.exists():
-            formatter.error(f"Source file not found: {source_path}")
+            formatter.error(f"Source not found: {source_path}")
             return 1
-
-        data = source.read_bytes()
 
         image_type = detect_image_type(image_path)
 
@@ -352,14 +356,34 @@ def copy_to_image(source_path: str, image_path: str, partition: int | None, inte
             dest_display = f"{image_path}:\\{internal_path}"
 
         try:
-            volume.write_file(path_components, data)
+            if source.is_dir():
+                if not recursive:
+                    formatter.error(f"'{source_path}' is a directory. Use -r for recursive copy.")
+                    return 1
 
-            formatter.success(
-                f"Copied {len(data):,} bytes",
-                source=source_path,
-                dest=dest_display,
-                bytes=len(data)
-            )
+                # Recursive directory copy
+                total_files, total_bytes = _copy_dir_to_image(
+                    source, volume, path_components, formatter
+                )
+
+                formatter.success(
+                    f"Copied {total_files} file(s), {total_bytes:,} bytes total",
+                    source=source_path,
+                    dest=dest_display,
+                    files=total_files,
+                    bytes=total_bytes
+                )
+            else:
+                # Single file copy
+                data = source.read_bytes()
+                volume.write_file(path_components, data)
+
+                formatter.success(
+                    f"Copied {len(data):,} bytes",
+                    source=source_path,
+                    dest=dest_display,
+                    bytes=len(data)
+                )
         finally:
             disk.close()
 
@@ -371,6 +395,67 @@ def copy_to_image(source_path: str, image_path: str, partition: int | None, inte
     except OSError as e:
         formatter.error(f"Filesystem error: {e}")
         return 1
+
+
+def _copy_dir_to_image(
+    source_dir: Path,
+    volume,
+    dest_path_components: list[str],
+    formatter: OutputFormatter
+) -> tuple[int, int]:
+    """
+    Recursively copy a directory to a disk image.
+
+    Args:
+        source_dir: Source directory path
+        volume: Disk volume to copy to
+        dest_path_components: Destination path on disk
+        formatter: Output formatter
+
+    Returns:
+        (total_files, total_bytes) copied
+    """
+    total_files = 0
+    total_bytes = 0
+
+    # Create the destination directory
+    volume.create_directory(dest_path_components)
+
+    # Iterate through source directory
+    for item in source_dir.iterdir():
+        # Convert filename to DOS 8.3 format (uppercase, truncate if needed)
+        dos_name = item.name.upper()
+        if len(dos_name) > 12:  # Max 8.3 = 12 chars with dot
+            # Truncate name
+            if '.' in dos_name:
+                name_part, ext_part = dos_name.rsplit('.', 1)
+                dos_name = name_part[:8] + '.' + ext_part[:3]
+            else:
+                dos_name = dos_name[:8]
+
+        item_dest = dest_path_components + [dos_name]
+
+        if item.is_dir():
+            # Recurse into subdirectory
+            sub_files, sub_bytes = _copy_dir_to_image(item, volume, item_dest, formatter)
+            total_files += sub_files
+            total_bytes += sub_bytes
+        elif item.is_file():
+            # Copy file
+            try:
+                data = item.read_bytes()
+                volume.write_file(item_dest, data)
+                total_files += 1
+                total_bytes += len(data)
+
+                if not formatter.json_mode:
+                    dest_str = '\\'.join(item_dest)
+                    print(f"  {item} -> {dest_str} ({len(data):,} bytes)")
+            except Exception as e:
+                if not formatter.json_mode:
+                    print(f"  Warning: Failed to copy {item}: {e}")
+
+    return total_files, total_bytes
 
 
 def cmd_delete(args, formatter: OutputFormatter) -> int:
@@ -899,3 +984,126 @@ EXIT CODES
 def print_extended_help() -> None:
     """Print extended help documentation."""
     print(EXTENDED_HELP)
+
+
+def cmd_mkdir(args, formatter: OutputFormatter) -> int:
+    """Handle the 'mkdir' command - create a directory on disk image."""
+    image_path, partition, internal_path = parse_image_path(args.path)
+
+    if image_path is None:
+        formatter.error(f"Invalid disk image path: {args.path}")
+        return 1
+
+    if not internal_path:
+        formatter.error("No directory name specified. Use image.img:\\DIRNAME or image.img:N:\\DIRNAME")
+        return 1
+
+    try:
+        path_components = split_internal_path(internal_path)
+        if not path_components:
+            formatter.error("No directory name specified")
+            return 1
+
+        image_type = detect_image_type(image_path)
+
+        if image_type == 'cpm':
+            formatter.error("CP/M disks do not support subdirectories")
+            return 1
+
+        if image_type == 'harddisk':
+            if partition is None:
+                formatter.error("Partition number required for hard disk (e.g., image.img:0:\\DIRNAME)")
+                return 1
+            disk = V9KHardDiskImage(image_path, readonly=False)
+            volume = disk.get_partition(partition)
+            display_path = f"{image_path}:{partition}:\\{internal_path}"
+        elif image_type == 'ibmpc':
+            disk = IBMPCDiskImage(image_path, readonly=False)
+            volume = disk
+            display_path = f"{image_path}:\\{internal_path}"
+        else:
+            disk = V9KDiskImage(image_path, readonly=False)
+            volume = disk
+            display_path = f"{image_path}:\\{internal_path}"
+
+        try:
+            volume.create_directory(path_components)
+            volume.flush()
+
+            formatter.success(
+                f"Created directory {internal_path}",
+                directory=display_path
+            )
+        finally:
+            disk.close()
+
+        return 0
+
+    except V9KError as e:
+        formatter.error(str(e))
+        return 1
+    except OSError as e:
+        formatter.error(f"Filesystem error: {e}")
+        return 1
+
+
+def cmd_rmdir(args, formatter: OutputFormatter) -> int:
+    """Handle the 'rmdir' command - remove a directory from disk image."""
+    image_path, partition, internal_path = parse_image_path(args.path)
+
+    if image_path is None:
+        formatter.error(f"Invalid disk image path: {args.path}")
+        return 1
+
+    if not internal_path:
+        formatter.error("No directory name specified. Use image.img:\\DIRNAME or image.img:N:\\DIRNAME")
+        return 1
+
+    try:
+        path_components = split_internal_path(internal_path)
+        if not path_components:
+            formatter.error("No directory name specified")
+            return 1
+
+        image_type = detect_image_type(image_path)
+        recursive = getattr(args, 'recursive', False)
+
+        if image_type == 'cpm':
+            formatter.error("CP/M disks do not support subdirectories")
+            return 1
+
+        if image_type == 'harddisk':
+            if partition is None:
+                formatter.error("Partition number required for hard disk (e.g., image.img:0:\\DIRNAME)")
+                return 1
+            disk = V9KHardDiskImage(image_path, readonly=False)
+            volume = disk.get_partition(partition)
+            display_path = f"{image_path}:{partition}:\\{internal_path}"
+        elif image_type == 'ibmpc':
+            disk = IBMPCDiskImage(image_path, readonly=False)
+            volume = disk
+            display_path = f"{image_path}:\\{internal_path}"
+        else:
+            disk = V9KDiskImage(image_path, readonly=False)
+            volume = disk
+            display_path = f"{image_path}:\\{internal_path}"
+
+        try:
+            volume.delete_directory(path_components, recursive=recursive)
+            volume.flush()
+
+            formatter.success(
+                f"Removed directory {internal_path}",
+                directory=display_path
+            )
+        finally:
+            disk.close()
+
+        return 0
+
+    except V9KError as e:
+        formatter.error(str(e))
+        return 1
+    except OSError as e:
+        formatter.error(f"Filesystem error: {e}")
+        return 1
