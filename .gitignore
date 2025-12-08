@@ -40,6 +40,7 @@ Thumbs.db
 
 # Claude Code settings (local)
 .claude/
+saved_prompts/
 
 # Example disks (too large for git)
 example_disks/
