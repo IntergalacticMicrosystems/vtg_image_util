@@ -1,0 +1,1747 @@
+
+ ▐▛███▜▌   Claude Code v2.0.60
+▝▜█████▛▘  Opus 4.5 · Claude Max
+  ▘▘ ▝▝    ~\Dropbox\Projects\Victor_9000\v9k_image_util
+
+> Please create a plan to add IBM PC format floppy image support to this 
+project 
+
+● I'll help you plan adding IBM PC floppy image support to this Victor 9000
+  disk image utility. Let me first explore the codebase to understand the
+  current architecture and the IBM PC format documentation.
+
+● 3 Explore agents finished (ctrl+o to expand)
+   ├─ Explore main utility architecture · 0 tool uses
+   │  ⎿  Done
+   ├─ Study IBM PC floppy format · 0 tool uses
+   │  ⎿  Done
+   └─ Compare Victor vs IBM formats · 0 tool uses
+      ⎿  Done
+
+● Excellent! I now have a comprehensive understanding of the codebase and
+  the differences between Victor 9000 and IBM PC floppy formats. Let me
+  launch a Plan agent to design the implementation approach, and also read a
+   key file to understand current detection logic.
+
+● Plan(Design IBM PC floppy support)
+  ⎿  Done (15 tool uses · 69.6k tokens · 2m 56s)                           
+
+● Read(v9k_image_util.py)
+  ⎿  Read 100 lines
+
+● I have a comprehensive understanding of the codebase and a detailed
+  implementation plan. Let me write the plan file and then ask you a
+  clarifying question.
+
+● Updated plan
+  ⎿  /plan to preview · ~\.claude\plans\vivid-rolling-honey.md
+
+● I've written the implementation plan. Before finalizing, I have one
+  question:
+                                                                           
+● User answered Claude's questions:
+  ⎿  · The plan supports standard IBM PC FAT12 formats (360KB, 720KB, 1.2MB,
+      1.44MB). Do you need support for any non-standard formats like DMF 
+     (1.68MB) or custom sector layouts? → Standard formats only
+
+● The plan already covers standard formats only. The implementation will
+  read geometry from the BPB, which naturally supports all standard formats
+  without hardcoding specific sizes.
+
+  Let me finalize the plan and exit plan mode.
+
+● Updated plan
+  ⎿  /plan to preview · ~\.claude\plans\vivid-rolling-honey.md
+
+● The plan is complete. Here's the summary:
+
+  Plan Summary
+
+  Goal: Add IBM PC FAT12 floppy image support (360KB, 720KB, 1.2MB, 1.44MB)
+
+  Approach: Create a new IBMPCDiskImage class that:
+  - Parses standard BIOS Parameter Block (BPB) from boot sector
+  - Uses variable sectors-per-cluster from BPB
+  - Implements same interface as V9KDiskImage
+
+  Key Changes to v9k_image_util.py:
+  1. Add IBMPCBIOSParameterBlock dataclass (~80 lines)
+  2. Add IBMPCDiskImage class (~600 lines)
+  3. Update detect_image_type() to return 'ibmpc' for IBM PC floppies
+  4. Update command handlers (list, copy, delete) to use new class
+
+  Detection: IBM PC floppies identified by:
+  - Boot signature 0x55AA
+  - Jump instruction at offset 0
+  - Valid BPB fields
+
+  Test file: example_disks/DOS622.IMG (360KB DOS 6.22 floppy)
+  ⎿  User rejected Claude's plan:
+     ╭─────────────────────────────────────────────────────────────────────────╮
+     │ Plan: Add IBM PC Floppy Image Support                                   │
+     │                                                                         │
+     │ Overview                                                                │
+     │                                                                         │
+     │ Add automatic detection and support for standard IBM PC FAT12 floppy    │
+     │ disk images (360KB, 720KB, 1.2MB, 1.44MB) alongside existing Victor 9000│
+     │  support. Geometry is read from the BPB, so any valid FAT12 floppy with │
+     │ standard BPB will work.                                                 │
+     │                                                                         │
+     │ Architecture Decision                                                   │
+     │                                                                         │
+     │ Create a new IBMPCDiskImage class rather than extending V9KDiskImage.   │
+     │                                                                         │
+     │ Rationale:                                                              │
+     │ - Different boot sector formats (IBM uses standard BPB, Victor uses     │
+     │ custom format)                                                          │
+     │ - Variable cluster sizes (IBM: 1-2 sectors/cluster from BPB; Victor:    │
+     │ fixed 4 sectors)                                                        │
+     │ - Different sector layout calculations (IBM from BPB fields; Victor from│
+     │  flags bit)                                                             │
+     │ - Cleaner separation of concerns, easier maintenance                    │
+     │                                                                         │
+     │ Files to Modify                                                         │
+     │                                                                         │
+     │ Primary: v9k_image_util.py                                              │
+     │                                                                         │
+     │ Implementation Steps                                                    │
+     │                                                                         │
+     │ Step 1: Add IBMPCBIOSParameterBlock Dataclass (~80 lines)               │
+     │                                                                         │
+     │ Location: After VirtualVolumeLabel class (around line 370)              │
+     │                                                                         │
+     │ @dataclass                                                              │
+     │ class IBMPCBIOSParameterBlock:                                          │
+     │     """BIOS Parameter Block for IBM PC FAT12 disks."""                  │
+     │     oem_name: str                                                       │
+     │     bytes_per_sector: int       # 0x0B - always 512                     │
+     │     sectors_per_cluster: int    # 0x0D - 1 or 2                         │
+     │     reserved_sectors: int       # 0x0E - usually 1                      │
+     │     num_fats: int               # 0x10 - usually 2                      │
+     │     root_entry_count: int       # 0x11 - 112 or 224                     │
+     │     total_sectors: int          # 0x13 or 0x20                          │
+     │     media_descriptor: int       # 0x15 - 0xF0 or 0xF9                   │
+     │     fat_sectors: int            # 0x16 - sectors per FAT                │
+     │     sectors_per_track: int      # 0x18                                  │
+     │     num_heads: int              # 0x1A                                  │
+     │     # Calculated values                                                 │
+     │     fat_start: int                                                      │
+     │     root_dir_start: int                                                 │
+     │     root_dir_sectors: int                                               │
+     │     data_start: int                                                     │
+     │     total_clusters: int                                                 │
+     │     cluster_size: int                                                   │
+     │                                                                         │
+     │     @classmethod                                                        │
+     │     def from_bytes(cls, data: bytes) -> 'IBMPCBIOSParameterBlock':      │
+     │         # Parse BPB fields from boot sector                             │
+     │         # Validate boot signature 0x55AA at offset 0x1FE                │
+     │         # Calculate derived layout values                               │
+     │                                                                         │
+     │ Step 2: Add IBMPCDiskImage Class (~600 lines)                           │
+     │                                                                         │
+     │ Location: After V9KFloppyImage = V9KDiskImage alias (around line 1385)  │
+     │                                                                         │
+     │ Key methods (same interface as V9KDiskImage):                           │
+     │ - __init__() - Open image, parse BPB, load FAT                          │
+     │ - _read_bpb() - Parse IBM PC boot sector BPB                            │
+     │ - _cluster_to_sector() - Convert cluster to sector using                │
+     │ BPB.sectors_per_cluster                                                 │
+     │ - read_sector() / write_sector() - Same as V9KDiskImage                 │
+     │ - _load_fat() / _write_fat() - Use BPB.fat_start, BPB.fat_sectors       │
+     │ - get_fat_entry() / set_fat_entry() - Same FAT12 encoding               │
+     │ - follow_chain() / allocate_chain() / free_chain() - Same logic         │
+     │ - read_root_directory() - Use BPB.root_dir_start, BPB.root_entry_count  │
+     │ - read_subdirectory() - Use variable cluster size from BPB              │
+     │ - resolve_path() / read_file() / write_file() / delete_file()           │
+     │ - list_files() / find_matching_files()                                  │
+     │ - Context manager methods                                               │
+     │                                                                         │
+     │ Step 3: Update detect_image_type() Function                             │
+     │                                                                         │
+     │ Location: Lines 493-526                                                 │
+     │                                                                         │
+     │ Change return type from 'floppy' | 'harddisk' to 'floppy' | 'harddisk' |│
+     │  'ibmpc'                                                                │
+     │                                                                         │
+     │ Detection order:                                                        │
+     │ 1. Size > 2MB → 'harddisk'                                              │
+     │ 2. Check for IBM PC signatures:                                         │
+     │   - Boot signature 0x55AA at offset 0x1FE                               │
+     │   - Jump instruction (0xEB or 0xE9) at offset 0                         │
+     │   - Valid BPB fields (BytesPerSector=512, SecPerCluster in [1,2,4,8])   │
+     │   - Media descriptor in valid range (0xF0, 0xF8-0xFF)                   │
+     │ → 'ibmpc'                                                               │
+     │ 3. Check for Victor hard disk label → 'harddisk'                        │
+     │ 4. Default → 'floppy' (Victor floppy)                                   │
+     │                                                                         │
+     │ Step 4: Update Command Handlers                                         │
+     │                                                                         │
+     │ Add elif image_type == 'ibmpc': branches to:                            │
+     │                                                                         │
+     │ - cmd_list() (lines 2159-2202)                                          │
+     │ - copy_from_image() (lines 2226-2352)                                   │
+     │ - copy_to_image() (lines 2355-2404)                                     │
+     │ - cmd_delete() (lines 2407-2452)                                        │
+     │                                                                         │
+     │ Each handler uses IBMPCDiskImage instead of V9KDiskImage when type is   │
+     │ 'ibmpc'.                                                                │
+     │                                                                         │
+     │ Step 5: Update Documentation                                            │
+     │                                                                         │
+     │ Update CLAUDE.md to document IBM PC floppy support.                     │
+     │                                                                         │
+     │ IBM PC Format Reference                                                 │
+     │                                                                         │
+     │ | Format | Size         | Sec/Cluster | FAT Sectors | Root Entries |    │
+     │ Data Start |                                                            │
+     │ |--------|--------------|-------------|-------------|--------------|----│
+     │ --------|                                                               │
+     │ | 360KB  | 720 sectors  | 2           | 2           | 112          | 12 │
+     │         |                                                               │
+     │ | 720KB  | 1440 sectors | 2           | 3           | 112          | 14 │
+     │         |                                                               │
+     │ | 1.2MB  | 2400 sectors | 1           | 7           | 224          | 29 │
+     │         |                                                               │
+     │ | 1.44MB | 2880 sectors | 1           | 9           | 224          | 33 │
+     │         |                                                               │
+     │                                                                         │
+     │ Test File                                                               │
+     │                                                                         │
+     │ example_disks/DOS622.IMG - 360KB DOS 6.22 floppy (368,640 bytes)        │
+     │                                                                         │
+     │ Testing Strategy                                                        │
+     │                                                                         │
+     │ 1. Verify detect_image_type() returns 'ibmpc' for DOS622.IMG            │
+     │ 2. Test list command on DOS622.IMG                                      │
+     │ 3. Test copy command to extract files                                   │
+     │ 4. Compare extracted files against example_disks/DOS622/ reference      │
+     │ 5. Test write/delete on a copy of DOS622.IMG                            │
+     │                                                                         │
+     │ Estimated Changes                                                       │
+     │                                                                         │
+     │ - ~80 lines: IBMPCBIOSParameterBlock dataclass                          │
+     │ - ~600 lines: IBMPCDiskImage class                                      │
+     │ - ~30 lines: detect_image_type() updates                                │
+     │ - ~40 lines: Command handler updates                                    │
+     │ - ~20 lines: Documentation                                              │
+     │ - Total: ~770 new lines, ~20 modified lines                             │
+     │                                                                         │
+     │                                                                         │
+     │                                                                         │
+     │                                                                         │
+     ╰─────────────────────────────────────────────────────────────────────────╯
+
+> continue 
+
+● Reading Plan(~\.claude\plans\vivid-rolling-honey.md)
+  ⎿  Read 126 lines
+
+● The plan is complete. Let me exit plan mode so we can proceed with
+  implementation.
+
+● Reading Plan(~\.claude\plans\vivid-rolling-honey.md)
+  ⎿  Read 126 lines
+
+● Updated plan
+  ⎿  /plan to preview · ~\.claude\plans\composed-tinkering-map.md
+                                                                           
+● User approved Claude's plan
+  ⎿  Plan saved to: ~\.claude\plans\composed-tinkering-map.md · /plan to 
+     edit
+     Plan: Add IBM PC Floppy Image Support
+
+     Overview
+
+     Add automatic detection and support for standard IBM PC FAT12 floppy 
+     disk images (360KB, 720KB, 1.2MB, 1.44MB) alongside existing Victor
+     9000 support. Geometry is read from the BPB, so any valid FAT12 floppy
+     with standard BPB will work.
+
+     Architecture Decision
+
+     Create a new IBMPCDiskImage class rather than extending V9KDiskImage.
+
+     Rationale:
+     - Different boot sector formats (IBM uses standard BPB, Victor uses 
+     custom format)
+     - Variable cluster sizes (IBM: 1-2 sectors/cluster from BPB; Victor: 
+     fixed 4 sectors)
+     - Different sector layout calculations (IBM from BPB fields; Victor 
+     from flags bit)
+     - Cleaner separation of concerns, easier maintenance
+
+     Files to Modify
+
+     Primary: v9k_image_util.py
+
+     Implementation Steps
+
+     Step 1: Add IBMPCBIOSParameterBlock Dataclass (~80 lines)
+
+     Location: After VirtualVolumeLabel class (around line 370)
+
+     @dataclass
+     class IBMPCBIOSParameterBlock:
+         """BIOS Parameter Block for IBM PC FAT12 disks."""
+         oem_name: str
+         bytes_per_sector: int       # 0x0B - always 512
+         sectors_per_cluster: int    # 0x0D - 1 or 2
+         reserved_sectors: int       # 0x0E - usually 1
+         num_fats: int               # 0x10 - usually 2
+         root_entry_count: int       # 0x11 - 112 or 224
+         total_sectors: int          # 0x13 or 0x20
+         media_descriptor: int       # 0x15 - 0xF0 or 0xF9
+         fat_sectors: int            # 0x16 - sectors per FAT
+         sectors_per_track: int      # 0x18
+         num_heads: int              # 0x1A
+         # Calculated values
+         fat_start: int
+         root_dir_start: int
+         root_dir_sectors: int
+         data_start: int
+         total_clusters: int
+         cluster_size: int
+
+         @classmethod
+         def from_bytes(cls, data: bytes) -> 'IBMPCBIOSParameterBlock':
+             # Parse BPB fields from boot sector
+             # Validate boot signature 0x55AA at offset 0x1FE
+             # Calculate derived layout values
+
+     Step 2: Add IBMPCDiskImage Class (~600 lines)
+
+     Location: After V9KFloppyImage = V9KDiskImage alias (around line 1385)
+
+     Key methods (same interface as V9KDiskImage):
+     - __init__() - Open image, parse BPB, load FAT
+     - _read_bpb() - Parse IBM PC boot sector BPB
+     - _cluster_to_sector() - Convert cluster to sector using 
+     BPB.sectors_per_cluster
+     - read_sector() / write_sector() - Same as V9KDiskImage
+     - _load_fat() / _write_fat() - Use BPB.fat_start, BPB.fat_sectors
+     - get_fat_entry() / set_fat_entry() - Same FAT12 encoding
+     - follow_chain() / allocate_chain() / free_chain() - Same logic
+     - read_root_directory() - Use BPB.root_dir_start, BPB.root_entry_count
+     - read_subdirectory() - Use variable cluster size from BPB
+     - resolve_path() / read_file() / write_file() / delete_file()
+     - list_files() / find_matching_files()
+     - Context manager methods
+
+     Step 3: Update detect_image_type() Function
+
+     Location: Lines 493-526
+
+     Change return type from 'floppy' | 'harddisk' to 'floppy' | 'harddisk' 
+     | 'ibmpc'
+
+     Detection order:
+     1. Size > 2MB → 'harddisk'
+     2. Check for IBM PC signatures:
+       - Boot signature 0x55AA at offset 0x1FE
+       - Jump instruction (0xEB or 0xE9) at offset 0
+       - Valid BPB fields (BytesPerSector=512, SecPerCluster in [1,2,4,8])
+       - Media descriptor in valid range (0xF0, 0xF8-0xFF)
+     → 'ibmpc'
+     3. Check for Victor hard disk label → 'harddisk'
+     4. Default → 'floppy' (Victor floppy)
+
+     Step 4: Update Command Handlers
+
+     Add elif image_type == 'ibmpc': branches to:
+
+     - cmd_list() (lines 2159-2202)
+     - copy_from_image() (lines 2226-2352)
+     - copy_to_image() (lines 2355-2404)
+     - cmd_delete() (lines 2407-2452)
+
+     Each handler uses IBMPCDiskImage instead of V9KDiskImage when type is 
+     'ibmpc'.
+
+     Step 5: Update Documentation
+
+     Update CLAUDE.md to document IBM PC floppy support.
+
+     IBM PC Format Reference
+
+     | Format | Size         | Sec/Cluster | FAT Sectors | Root Entries | 
+     Data Start |
+     |--------|--------------|-------------|-------------|--------------|---
+     ---------|
+     | 360KB  | 720 sectors  | 2           | 2           | 112          | 12
+              |
+     | 720KB  | 1440 sectors | 2           | 3           | 112          | 14
+              |
+     | 1.2MB  | 2400 sectors | 1           | 7           | 224          | 29
+              |
+     | 1.44MB | 2880 sectors | 1           | 9           | 224          | 33
+              |
+
+     Test File
+
+     example_disks/DOS622.IMG - 360KB DOS 6.22 floppy (368,640 bytes)
+
+     Testing Strategy
+
+     1. Verify detect_image_type() returns 'ibmpc' for DOS622.IMG
+     2. Test list command on DOS622.IMG
+     3. Test copy command to extract files
+     4. Compare extracted files against example_disks/DOS622/ reference
+     5. Test write/delete on a copy of DOS622.IMG
+
+     Estimated Changes
+
+     - ~80 lines: IBMPCBIOSParameterBlock dataclass
+     - ~600 lines: IBMPCDiskImage class
+     - ~30 lines: detect_image_type() updates
+     - ~40 lines: Command handler updates
+     - ~20 lines: Documentation
+     - Total: ~770 new lines, ~20 modified lines
+
+
+
+● The plan is approved. Let me set up the task tracking and begin
+  implementation.
+
+● Read(v9k_image_util.py)
+  ⎿  Read 80 lines
+
+● I can see where to add the new dataclass. Let me add
+  IBMPCBIOSParameterBlock after line 367, before the Utility Functions
+  section.
+
+● Update(v9k_image_util.py)
+  ⎿  Updated v9k_image_util.py with 92 additions                         
+       367            )
+       368    
+       369    
+       370 +  @dataclass
+       371 +  class IBMPCBIOSParameterBlock:
+       372 +      """BIOS Parameter Block for IBM PC FAT12 floppy 
+           + disks."""
+       373 +      oem_name: str
+       374 +      bytes_per_sector: int       # 0x0B - always 512
+       375 +      sectors_per_cluster: int    # 0x0D - 1 or 2 typically
+       376 +      reserved_sectors: int       # 0x0E - usually 1
+       377 +      num_fats: int               # 0x10 - usually 2
+       378 +      root_entry_count: int       # 0x11 - 112 or 224
+       379 +      total_sectors: int          # 0x13 or 0x20
+       380 +      media_descriptor: int       # 0x15 - 0xF0 or 0xF9
+       381 +      fat_sectors: int            # 0x16 - sectors per FAT
+       382 +      sectors_per_track: int      # 0x18
+       383 +      num_heads: int              # 0x1A
+       384 +      # Calculated values
+       385 +      fat_start: int = 0
+       386 +      root_dir_start: int = 0
+       387 +      root_dir_sectors: int = 0
+       388 +      data_start: int = 0
+       389 +      total_clusters: int = 0
+       390 +      cluster_size: int = 0
+       391 +  
+       392 +      @classmethod
+       393 +      def from_bytes(cls, data: bytes) -> 
+           + 'IBMPCBIOSParameterBlock':
+       394 +          """Parse BPB from boot sector data."""
+       395 +          if len(data) < 512:
+       396 +              raise DiskError("Boot sector too small")
+       397 +  
+       398 +          # Check boot signature
+       399 +          boot_sig = struct.unpack_from('<H', data, 0x1FE)[0]
+       400 +          if boot_sig != 0xAA55:
+       401 +              raise DiskError(f"Invalid boot signature: 
+           + 0x{boot_sig:04X}")
+       402 +  
+       403 +          # Parse BPB fields
+       404 +          oem_name = data[0x03:0x0B].decode('ascii', 
+           + errors='replace').strip()
+       405 +          bytes_per_sector = struct.unpack_from('<H', data, 
+           + 0x0B)[0]
+       406 +          sectors_per_cluster = data[0x0D]
+       407 +          reserved_sectors = struct.unpack_from('<H', data, 
+           + 0x0E)[0]
+       408 +          num_fats = data[0x10]
+       409 +          root_entry_count = struct.unpack_from('<H', data, 
+           + 0x11)[0]
+       410 +          total_sectors_16 = struct.unpack_from('<H', data, 
+           + 0x13)[0]
+       411 +          media_descriptor = data[0x15]
+       412 +          fat_sectors = struct.unpack_from('<H', data, 
+           + 0x16)[0]
+       413 +          sectors_per_track = struct.unpack_from('<H', data, 
+           + 0x18)[0]
+       414 +          num_heads = struct.unpack_from('<H', data, 0x1A)[0]
+       415 +  
+       416 +          # Use TotalSectors16 unless it's 0 (then use 
+           + TotalSectors32)
+       417 +          if total_sectors_16 == 0:
+       418 +              total_sectors = struct.unpack_from('<I', data, 
+           + 0x20)[0]
+       419 +          else:
+       420 +              total_sectors = total_sectors_16
+       421 +  
+       422 +          # Validate BPB
+       423 +          if bytes_per_sector != 512:
+       424 +              raise DiskError(f"Unsupported bytes per sector:
+           +  {bytes_per_sector}")
+       425 +          if sectors_per_cluster not in (1, 2, 4, 8):
+       426 +              raise DiskError(f"Invalid sectors per cluster: 
+           + {sectors_per_cluster}")
+       427 +          if num_fats == 0:
+       428 +              raise DiskError("NumFATs cannot be zero")
+       429 +          if fat_sectors == 0:
+       430 +              raise DiskError("FATSize16 cannot be zero")
+       431 +  
+       432 +          # Calculate derived values
+       433 +          fat_start = reserved_sectors
+       434 +          root_dir_start = fat_start + (num_fats * 
+           + fat_sectors)
+       435 +          root_dir_sectors = (root_entry_count * 32 + 511) //
+           +  512
+       436 +          data_start = root_dir_start + root_dir_sectors
+       437 +          data_sectors = total_sectors - data_start
+       438 +          total_clusters = data_sectors // 
+           + sectors_per_cluster
+       439 +          cluster_size = bytes_per_sector * 
+           + sectors_per_cluster
+       440 +  
+       441 +          return cls(
+       442 +              oem_name=oem_name,
+       443 +              bytes_per_sector=bytes_per_sector,
+       444 +              sectors_per_cluster=sectors_per_cluster,
+       445 +              reserved_sectors=reserved_sectors,
+       446 +              num_fats=num_fats,
+       447 +              root_entry_count=root_entry_count,
+       448 +              total_sectors=total_sectors,
+       449 +              media_descriptor=media_descriptor,
+       450 +              fat_sectors=fat_sectors,
+       451 +              sectors_per_track=sectors_per_track,
+       452 +              num_heads=num_heads,
+       453 +              fat_start=fat_start,
+       454 +              root_dir_start=root_dir_start,
+       455 +              root_dir_sectors=root_dir_sectors,
+       456 +              data_start=data_start,
+       457 +              total_clusters=total_clusters,
+       458 +              cluster_size=cluster_size
+       459 +          )
+       460 +  
+       461 +  
+       462    # =========================================================
+             ====================
+       463    # Utility Functions
+       464    # =========================================================
+             ====================
+
+● Step 1 is complete. Let me mark it and find where to add the
+  IBMPCDiskImage class.
+
+● Search(pattern: "V9KFloppyImage = V9KDiskImage", path: "v9k_image_util.py",
+        output_mode: "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+● Read(v9k_image_util.py)
+  ⎿  Read 20 lines
+
+● Let me read the V9KDiskImage class to understand its structure, then add
+  the IBMPCDiskImage class.
+
+● Read(v9k_image_util.py)
+  ⎿  Read 800 lines
+
+● Now I understand the V9KDiskImage structure. Let me add the IBMPCDiskImage
+   class after the V9KFloppyImage alias. The key differences are using the
+  BPB for geometry and variable sectors-per-cluster.
+
+● Update(v9k_image_util.py)
+  ⎿  Updated v9k_image_util.py with 607 additions                        
+       1473    
+       1474    
+       1475    # ========================================================
+              =====================
+       1476 +  # IBM PC Disk Image
+       1477 +  # ========================================================
+            + =====================
+       1478 +  
+       1479 +  class IBMPCDiskImage:
+       1480 +      """IBM PC FAT12 floppy disk image operations."""
+       1481 +  
+       1482 +      def __init__(self, image_path: str, readonly: bool = 
+            + True):
+       1483 +          """Open disk image and read BPB parameters."""
+       1484 +          self.image_path = image_path
+       1485 +          self.readonly = readonly
+       1486 +          self._file: BinaryIO | None = None
+       1487 +          self._fat_data: bytearray | None = None
+       1488 +          self._fat_dirty = False
+       1489 +          self._bpb: IBMPCBIOSParameterBlock | None = None
+       1490 +  
+       1491 +          # Open file
+       1492 +          mode = 'rb' if readonly else 'r+b'
+       1493 +          try:
+       1494 +              self._file = open(image_path, mode)
+       1495 +          except OSError as e:
+       1496 +              raise DiskError(f"Cannot open disk image: 
+            + {e}")
+       1497 +  
+       1498 +          self._read_bpb()
+       1499 +          self._load_fat()
+       1500 +  
+       1501 +      def _read_bpb(self) -> None:
+       1502 +          """Parse BPB from boot sector."""
+       1503 +          boot = self.read_sector(0)
+       1504 +          self._bpb = 
+            + IBMPCBIOSParameterBlock.from_bytes(boot)
+       1505 +  
+       1506 +      def _cluster_to_sector(self, cluster: int) -> int:
+       1507 +          """Convert cluster number to first sector of that 
+            + cluster."""
+       1508 +          return self._bpb.data_start + (cluster - 2) * 
+            + self._bpb.sectors_per_cluster
+       1509 +  
+       1510 +      def read_sector(self, sector_num: int) -> bytes:
+       1511 +          """Read a single sector from the disk image."""
+       1512 +          if self._file is None:
+       1513 +              raise DiskError("Disk image not open")
+       1514 +  
+       1515 +          offset = sector_num * SECTOR_SIZE
+       1516 +          self._file.seek(offset)
+       1517 +          data = self._file.read(SECTOR_SIZE)
+       1518 +  
+       1519 +          if len(data) < SECTOR_SIZE:
+       1520 +              data = data + bytes(SECTOR_SIZE - len(data))
+       1521 +  
+       1522 +          return data
+       1523 +  
+       1524 +      def write_sector(self, sector_num: int, data: bytes) 
+            + -> None:
+       1525 +          """Write a single sector to the disk image."""
+       1526 +          if self._file is None:
+       1527 +              raise DiskError("Disk image not open")
+       1528 +          if self.readonly:
+       1529 +              raise DiskError("Disk image opened in 
+            + read-only mode")
+       1530 +  
+       1531 +          if len(data) != SECTOR_SIZE:
+       1532 +              raise DiskError(f"Invalid sector size: 
+            + {len(data)}")
+       1533 +  
+       1534 +          offset = sector_num * SECTOR_SIZE
+       1535 +          self._file.seek(offset)
+       1536 +          self._file.write(data)
+       1537 +  
+       1538 +      def _load_fat(self) -> None:
+       1539 +          """Load FAT into memory."""
+       1540 +          fat_data = bytearray()
+       1541 +          for i in range(self._bpb.fat_sectors):
+       1542 +              sector = self.read_sector(self._bpb.fat_start 
+            + + i)
+       1543 +              fat_data.extend(sector)
+       1544 +          self._fat_data = fat_data
+       1545 +          self._fat_dirty = False
+       1546 +  
+       1547 +      def _write_fat(self) -> None:
+       1548 +          """Write FAT back to disk (all copies)."""
+       1549 +          if self._fat_data is None or not self._fat_dirty:
+       1550 +              return
+       1551 +  
+       1552 +          for copy in range(self._bpb.num_fats):
+       1553 +              fat_start = self._bpb.fat_start + (copy * 
+            + self._bpb.fat_sectors)
+       1554 +              for i in range(self._bpb.fat_sectors):
+       1555 +                  start = i * SECTOR_SIZE
+       1556 +                  end = start + SECTOR_SIZE
+       1557 +                  self.write_sector(fat_start + i, 
+            + bytes(self._fat_data[start:end]))
+       1558 +  
+       1559 +          self._fat_dirty = False
+       1560 +  
+       1561 +      def get_fat_entry(self, cluster: int) -> int:
+       1562 +          """Read a 12-bit FAT entry."""
+       1563 +          if self._fat_data is None:
+       1564 +              raise DiskError("FAT not loaded")
+       1565 +  
+       1566 +          offset = cluster + (cluster // 2)
+       1567 +  
+       1568 +          if offset + 1 >= len(self._fat_data):
+       1569 +              return FAT_FREE
+       1570 +  
+       1571 +          word = self._fat_data[offset] | 
+            + (self._fat_data[offset + 1] << 8)
+       1572 +  
+       1573 +          if cluster % 2 == 0:
+       1574 +              return word & 0x0FFF
+       1575 +          else:
+       1576 +              return word >> 4
+       1577 +  
+       1578 +      def set_fat_entry(self, cluster: int, value: int) -> 
+            + None:
+       1579 +          """Write a 12-bit FAT entry."""
+       1580 +          if self._fat_data is None:
+       1581 +              raise DiskError("FAT not loaded")
+       1582 +  
+       1583 +          offset = cluster + (cluster // 2)
+       1584 +  
+       1585 +          if offset + 1 >= len(self._fat_data):
+       1586 +              raise DiskError(f"FAT offset out of range: 
+            + {offset}")
+       1587 +  
+       1588 +          word = self._fat_data[offset] | 
+            + (self._fat_data[offset + 1] << 8)
+       1589 +  
+       1590 +          if cluster % 2 == 0:
+       1591 +              word = (word & 0xF000) | (value & 0x0FFF)
+       1592 +          else:
+       1593 +              word = (word & 0x000F) | ((value & 0x0FFF) << 
+            + 4)
+       1594 +  
+       1595 +          self._fat_data[offset] = word & 0xFF
+       1596 +          self._fat_data[offset + 1] = (word >> 8) & 0xFF
+       1597 +  
+       1598 +          self._fat_dirty = True
+       1599 +  
+       1600 +      def follow_chain(self, start_cluster: int) -> 
+            + list[int]:
+       1601 +          """Return list of all clusters in chain starting 
+            + at start_cluster."""
+       1602 +          if start_cluster == 0:
+       1603 +              return []
+       1604 +  
+       1605 +          chain = []
+       1606 +          cluster = start_cluster
+       1607 +          seen = set()
+       1608 +  
+       1609 +          while 0x002 <= cluster <= 0xFEF:
+       1610 +              if cluster in seen:
+       1611 +                  raise CorruptedDiskError(f"Circular 
+            + cluster chain at {cluster}")
+       1612 +              seen.add(cluster)
+       1613 +              chain.append(cluster)
+       1614 +              cluster = self.get_fat_entry(cluster)
+       1615 +  
+       1616 +          return chain
+       1617 +  
+       1618 +      def find_free_cluster(self) -> int | None:
+       1619 +          """Find a free cluster. Returns None if disk is 
+            + full."""
+       1620 +          for cluster in range(2, self._bpb.total_clusters +
+            +  2):
+       1621 +              if self.get_fat_entry(cluster) == FAT_FREE:
+       1622 +                  return cluster
+       1623 +          return None
+       1624 +  
+       1625 +      def allocate_chain(self, num_clusters: int) -> 
+            + list[int]:
+       1626 +          """Allocate a chain of free clusters."""
+       1627 +          if num_clusters == 0:
+       1628 +              return []
+       1629 +  
+       1630 +          free_clusters = []
+       1631 +          for cluster in range(2, self._bpb.total_clusters +
+            +  2):
+       1632 +              if self.get_fat_entry(cluster) == FAT_FREE:
+       1633 +                  free_clusters.append(cluster)
+       1634 +                  if len(free_clusters) == num_clusters:
+       1635 +                      break
+       1636 +  
+       1637 +          if len(free_clusters) < num_clusters:
+       1638 +              raise DiskFullError(f"Need {num_clusters} 
+            + clusters, only {len(free_clusters)} free")
+       1639 +  
+       1640 +          for i, cluster in enumerate(free_clusters[:-1]):
+       1641 +              self.set_fat_entry(cluster, free_clusters[i + 
+            + 1])
+       1642 +  
+       1643 +          self.set_fat_entry(free_clusters[-1], 0xFFF)
+       1644 +  
+       1645 +          return free_clusters
+       1646 +  
+       1647 +      def free_chain(self, start_cluster: int) -> None:
+       1648 +          """Free all clusters in a chain."""
+       1649 +          clusters = self.follow_chain(start_cluster)
+       1650 +          for cluster in clusters:
+       1651 +              self.set_fat_entry(cluster, FAT_FREE)
+       1652 +  
+       1653 +      def read_root_directory(self) -> list[DirectoryEntry]:
+       1654 +          """Read all entries from root directory."""
+       1655 +          entries = []
+       1656 +          for i in range(self._bpb.root_dir_sectors):
+       1657 +              sector_data = 
+            + self.read_sector(self._bpb.root_dir_start + i)
+       1658 +              for j in range(SECTOR_SIZE // DIR_ENTRY_SIZE):
+       1659 +                  offset = j * DIR_ENTRY_SIZE
+       1660 +                  entry_data = sector_data[offset:offset + 
+            + DIR_ENTRY_SIZE]
+       1661 +                  entry = 
+            + DirectoryEntry.from_bytes(entry_data)
+       1662 +  
+       1663 +                  if entry.is_end:
+       1664 +                      return entries
+       1665 +                  if not entry.is_free and not 
+            + entry.is_volume_label:
+       1666 +                      entries.append(entry)
+       1667 +  
+       1668 +          return entries
+       1669 +  
+       1670 +      def read_subdirectory(self, start_cluster: int) -> 
+            + list[DirectoryEntry]:
+       1671 +          """Read all entries from a subdirectory."""
+       1672 +          entries = []
+       1673 +          clusters = self.follow_chain(start_cluster)
+       1674 +  
+       1675 +          for cluster in clusters:
+       1676 +              first_sector = 
+            + self._cluster_to_sector(cluster)
+       1677 +              for sec_offset in 
+            + range(self._bpb.sectors_per_cluster):
+       1678 +                  sector_data = 
+            + self.read_sector(first_sector + sec_offset)
+       1679 +  
+       1680 +                  for j in range(SECTOR_SIZE // 
+            + DIR_ENTRY_SIZE):
+       1681 +                      offset = j * DIR_ENTRY_SIZE
+       1682 +                      entry_data = sector_data[offset:offset
+            +  + DIR_ENTRY_SIZE]
+       1683 +                      entry = 
+            + DirectoryEntry.from_bytes(entry_data)
+       1684 +  
+       1685 +                      if entry.is_end:
+       1686 +                          return entries
+       1687 +                      if not entry.is_free and not 
+            + entry.is_volume_label:
+       1688 +                          entries.append(entry)
+       1689 +  
+       1690 +          return entries
+       1691 +  
+       1692 +      def read_directory(self, cluster: int | None = None) 
+            + -> list[DirectoryEntry]:
+       1693 +          """Read directory entries. cluster=None for root 
+            + directory."""
+       1694 +          if cluster is None:
+       1695 +              return self.read_root_directory()
+       1696 +          return self.read_subdirectory(cluster)
+       1697 +  
+       1698 +      def resolve_path(self, path_components: list[str]) -> 
+            + tuple[int | None, DirectoryEntry | None]:
+       1699 +          """
+       1700 +          Resolve path to directory cluster and final entry.
+       1701 +          Returns (directory_cluster, entry) where:
+       1702 +          - directory_cluster is None for root directory
+       1703 +          - entry is None if path refers to a directory (not
+            +  a file)
+       1704 +          - entry is the file entry if path refers to a file
+       1705 +          """
+       1706 +          if not path_components:
+       1707 +              return (None, None)
+       1708 +  
+       1709 +          current_cluster: int | None = None
+       1710 +  
+       1711 +          for i, component in enumerate(path_components):
+       1712 +              is_last = (i == len(path_components) - 1)
+       1713 +  
+       1714 +              name, ext = validate_filename(component)
+       1715 +  
+       1716 +              entries = self.read_directory(current_cluster)
+       1717 +              found = None
+       1718 +  
+       1719 +              for entry in entries:
+       1720 +                  if entry.name == name and entry.extension 
+            + == ext:
+       1721 +                      found = entry
+       1722 +                      break
+       1723 +  
+       1724 +              if found is None:
+       1725 +                  raise FileNotFoundError(f"'{component}' 
+            + not found")
+       1726 +  
+       1727 +              if is_last:
+       1728 +                  if found.is_directory:
+       1729 +                      return (found.first_cluster, None)
+       1730 +                  else:
+       1731 +                      return (current_cluster, found)
+       1732 +              else:
+       1733 +                  if not found.is_directory:
+       1734 +                      raise 
+            + FileNotFoundError(f"'{component}' is not a directory")
+       1735 +                  current_cluster = found.first_cluster
+       1736 +  
+       1737 +          return (current_cluster, None)
+       1738 +  
+       1739 +      def find_entry(self, path_components: list[str]) -> 
+            + DirectoryEntry:
+       1740 +          """Find a file or directory entry by path."""
+       1741 +          if not path_components:
+       1742 +              raise FileNotFoundError("Empty path")
+       1743 +  
+       1744 +          dir_cluster, entry = 
+            + self.resolve_path(path_components)
+       1745 +  
+       1746 +          if entry is not None:
+       1747 +              return entry
+       1748 +  
+       1749 +          dir_entries = self.read_directory(dir_cluster)
+       1750 +          for e in dir_entries:
+       1751 +              if e.name.rstrip() == '.':
+       1752 +                  return e
+       1753 +  
+       1754 +          return DirectoryEntry(
+       1755 +              name='        ',
+       1756 +              extension='   ',
+       1757 +              attributes=ATTR_DIRECTORY,
+       1758 +              first_cluster=dir_cluster or 0,
+       1759 +              file_size=0
+       1760 +          )
+       1761 +  
+       1762 +      def read_file(self, path_components: list[str]) -> 
+            + bytes:
+       1763 +          """Read complete file contents."""
+       1764 +          _, entry = self.resolve_path(path_components)
+       1765 +  
+       1766 +          if entry is None:
+       1767 +              raise FileNotFoundError("Path refers to a 
+            + directory, not a file")
+       1768 +  
+       1769 +          if entry.is_directory:
+       1770 +              raise FileNotFoundError(f"'{entry.full_name}' 
+            + is a directory")
+       1771 +  
+       1772 +          if entry.file_size == 0:
+       1773 +              return b''
+       1774 +  
+       1775 +          clusters = self.follow_chain(entry.first_cluster)
+       1776 +          data = bytearray()
+       1777 +  
+       1778 +          for cluster in clusters:
+       1779 +              first_sector = 
+            + self._cluster_to_sector(cluster)
+       1780 +              for sec_offset in 
+            + range(self._bpb.sectors_per_cluster):
+       1781 +                  data.extend(self.read_sector(first_sector 
+            + + sec_offset))
+       1782 +  
+       1783 +          return bytes(data[:entry.file_size])
+       1784 +  
+       1785 +      def _find_free_dir_slot(self, dir_cluster: int | None)
+            +  -> tuple[int, int]:
+       1786 +          """
+       1787 +          Find a free directory entry slot.
+       1788 +          Returns (sector_num, entry_index) for root 
+            + directory, or
+       1789 +          (cluster, entry_index) for subdirectory.
+       1790 +          """
+       1791 +          if dir_cluster is None:
+       1792 +              for i in range(self._bpb.root_dir_sectors):
+       1793 +                  sector_data = 
+            + self.read_sector(self._bpb.root_dir_start + i)
+       1794 +                  for j in range(SECTOR_SIZE // 
+            + DIR_ENTRY_SIZE):
+       1795 +                      offset = j * DIR_ENTRY_SIZE
+       1796 +                      first_byte = sector_data[offset]
+       1797 +                      if first_byte == 0x00 or first_byte ==
+            +  0xE5:
+       1798 +                          return (self._bpb.root_dir_start +
+            +  i, j)
+       1799 +              raise DirectoryFullError("Root directory is 
+            + full")
+       1800 +          else:
+       1801 +              clusters = self.follow_chain(dir_cluster)
+       1802 +              for cluster in clusters:
+       1803 +                  first_sector = 
+            + self._cluster_to_sector(cluster)
+       1804 +                  for sec_offset in 
+            + range(self._bpb.sectors_per_cluster):
+       1805 +                      sector_data = 
+            + self.read_sector(first_sector + sec_offset)
+       1806 +                      for j in range(SECTOR_SIZE // 
+            + DIR_ENTRY_SIZE):
+       1807 +                          offset = j * DIR_ENTRY_SIZE
+       1808 +                          first_byte = sector_data[offset]
+       1809 +                          if first_byte == 0x00 or 
+            + first_byte == 0xE5:
+       1810 +                              return (cluster, sec_offset * 
+            + (SECTOR_SIZE // DIR_ENTRY_SIZE) + j)
+       1811 +  
+       1812 +              new_cluster = self.find_free_cluster()
+       1813 +              if new_cluster is None:
+       1814 +                  raise DiskFullError("No free clusters for 
+            + directory expansion")
+       1815 +  
+       1816 +              last_cluster = clusters[-1] if clusters else 
+            + dir_cluster
+       1817 +              self.set_fat_entry(last_cluster, new_cluster)
+       1818 +              self.set_fat_entry(new_cluster, 0xFFF)
+       1819 +  
+       1820 +              first_sector = 
+            + self._cluster_to_sector(new_cluster)
+       1821 +              for sec_offset in 
+            + range(self._bpb.sectors_per_cluster):
+       1822 +                  self.write_sector(first_sector + 
+            + sec_offset, bytes(SECTOR_SIZE))
+       1823 +  
+       1824 +              return (new_cluster, 0)
+       1825 +  
+       1826 +      def _write_dir_entry(self, location: tuple[int, int], 
+            + entry: DirectoryEntry, is_root: bool) -> None:
+       1827 +          """Write directory entry at specified location."""
+       1828 +          if is_root:
+       1829 +              sector_num, entry_idx = location
+       1830 +              offset = entry_idx * DIR_ENTRY_SIZE
+       1831 +          else:
+       1832 +              cluster, entry_idx = location
+       1833 +              entries_per_sector = SECTOR_SIZE // 
+            + DIR_ENTRY_SIZE
+       1834 +              sector_in_cluster = entry_idx // 
+            + entries_per_sector
+       1835 +              entry_in_sector = entry_idx % 
+            + entries_per_sector
+       1836 +              sector_num = self._cluster_to_sector(cluster) 
+            + + sector_in_cluster
+       1837 +              offset = entry_in_sector * DIR_ENTRY_SIZE
+       1838 +  
+       1839 +          sector_data = 
+            + bytearray(self.read_sector(sector_num))
+       1840 +          sector_data[offset:offset + DIR_ENTRY_SIZE] = 
+            + entry.to_bytes()
+       1841 +          self.write_sector(sector_num, bytes(sector_data))
+       1842 +  
+       1843 +      def write_file(self, path_components: list[str], data:
+            +  bytes) -> None:
+       1844 +          """Write file to disk image."""
+       1845 +          if not path_components:
+       1846 +              raise InvalidFilenameError("Empty path")
+       1847 +  
+       1848 +          dir_path = path_components[:-1]
+       1849 +          filename = path_components[-1]
+       1850 +  
+       1851 +          name, ext = validate_filename(filename)
+       1852 +  
+       1853 +          if dir_path:
+       1854 +              dir_cluster, dir_entry = 
+            + self.resolve_path(dir_path)
+       1855 +              if dir_entry is not None and not 
+            + dir_entry.is_directory:
+       1856 +                  raise FileNotFoundError(f"'{dir_path[-1]}'
+            +  is not a directory")
+       1857 +              if dir_entry is not None:
+       1858 +                  dir_cluster = dir_entry.first_cluster
+       1859 +          else:
+       1860 +              dir_cluster = None
+       1861 +  
+       1862 +          entries = self.read_directory(dir_cluster)
+       1863 +          for entry in entries:
+       1864 +              if entry.name == name and entry.extension == 
+            + ext:
+       1865 +                  if entry.is_directory:
+       1866 +                      raise DiskError(f"'{filename}' is a 
+            + directory")
+       1867 +                  self.free_chain(entry.first_cluster)
+       1868 +                  self._delete_entry_by_name(dir_cluster, 
+            + name, ext)
+       1869 +                  break
+       1870 +  
+       1871 +          num_clusters = (len(data) + self._bpb.cluster_size
+            +  - 1) // self._bpb.cluster_size
+       1872 +          if num_clusters == 0 and len(data) == 0:
+       1873 +              num_clusters = 0
+       1874 +  
+       1875 +          clusters = self.allocate_chain(num_clusters) if 
+            + num_clusters > 0 else []
+       1876 +  
+       1877 +          data_offset = 0
+       1878 +          for cluster in clusters:
+       1879 +              first_sector = 
+            + self._cluster_to_sector(cluster)
+       1880 +              for sec_offset in 
+            + range(self._bpb.sectors_per_cluster):
+       1881 +                  chunk = data[data_offset:data_offset + 
+            + SECTOR_SIZE]
+       1882 +                  if len(chunk) < SECTOR_SIZE:
+       1883 +                      chunk = chunk + bytes(SECTOR_SIZE - 
+            + len(chunk))
+       1884 +                  self.write_sector(first_sector + 
+            + sec_offset, chunk)
+       1885 +                  data_offset += SECTOR_SIZE
+       1886 +  
+       1887 +          import time
+       1888 +          now = time.localtime()
+       1889 +          date_val = ((now.tm_year - 1980) << 9) | 
+            + (now.tm_mon << 5) | now.tm_mday
+       1890 +          time_val = (now.tm_hour << 11) | (now.tm_min << 5)
+            +  | (now.tm_sec // 2)
+       1891 +  
+       1892 +          entry = DirectoryEntry(
+       1893 +              name=name,
+       1894 +              extension=ext,
+       1895 +              attributes=ATTR_ARCHIVE,
+       1896 +              first_cluster=clusters[0] if clusters else 0,
+       1897 +              file_size=len(data),
+       1898 +              create_time=time_val,
+       1899 +              create_date=date_val,
+       1900 +              modify_time=time_val,
+       1901 +              modify_date=date_val
+       1902 +          )
+       1903 +  
+       1904 +          location = self._find_free_dir_slot(dir_cluster)
+       1905 +          self._write_dir_entry(location, entry, dir_cluster
+            +  is None)
+       1906 +  
+       1907 +          self._write_fat()
+       1908 +  
+       1909 +      def _delete_entry_by_name(self, dir_cluster: int | 
+            + None, name: str, ext: str) -> None:
+       1910 +          """Mark directory entry as deleted."""
+       1911 +          if dir_cluster is None:
+       1912 +              for i in range(self._bpb.root_dir_sectors):
+       1913 +                  sector_data = 
+            + bytearray(self.read_sector(self._bpb.root_dir_start + i))
+       1914 +                  for j in range(SECTOR_SIZE // 
+            + DIR_ENTRY_SIZE):
+       1915 +                      offset = j * DIR_ENTRY_SIZE
+       1916 +                      entry_name = sector_data[offset:offset
+            +  + 8].decode('latin-1')
+       1917 +                      entry_ext = sector_data[offset + 
+            + 8:offset + 11].decode('latin-1')
+       1918 +                      if entry_name == name and entry_ext ==
+            +  ext:
+       1919 +                          sector_data[offset] = 0xE5
+       1920 +                          
+            + self.write_sector(self._bpb.root_dir_start + i, 
+            + bytes(sector_data))
+       1921 +                          return
+       1922 +          else:
+       1923 +              clusters = self.follow_chain(dir_cluster)
+       1924 +              for cluster in clusters:
+       1925 +                  first_sector = 
+            + self._cluster_to_sector(cluster)
+       1926 +                  for sec_offset in 
+            + range(self._bpb.sectors_per_cluster):
+       1927 +                      sector = first_sector + sec_offset
+       1928 +                      sector_data = 
+            + bytearray(self.read_sector(sector))
+       1929 +                      for j in range(SECTOR_SIZE // 
+            + DIR_ENTRY_SIZE):
+       1930 +                          offset = j * DIR_ENTRY_SIZE
+       1931 +                          entry_name = 
+            + sector_data[offset:offset + 8].decode('latin-1')
+       1932 +                          entry_ext = sector_data[offset + 
+            + 8:offset + 11].decode('latin-1')
+       1933 +                          if entry_name == name and 
+            + entry_ext == ext:
+       1934 +                              sector_data[offset] = 0xE5
+       1935 +                              self.write_sector(sector, 
+            + bytes(sector_data))
+       1936 +                              return
+       1937 +  
+       1938 +      def delete_file(self, path_components: list[str]) -> 
+            + None:
+       1939 +          """Delete a file from the disk image."""
+       1940 +          if not path_components:
+       1941 +              raise InvalidFilenameError("Empty path")
+       1942 +  
+       1943 +          dir_path = path_components[:-1]
+       1944 +          filename = path_components[-1]
+       1945 +  
+       1946 +          name, ext = validate_filename(filename)
+       1947 +  
+       1948 +          if dir_path:
+       1949 +              dir_cluster, _ = self.resolve_path(dir_path)
+       1950 +          else:
+       1951 +              dir_cluster = None
+       1952 +  
+       1953 +          entries = self.read_directory(dir_cluster)
+       1954 +          target = None
+       1955 +          for entry in entries:
+       1956 +              if entry.name == name and entry.extension == 
+            + ext:
+       1957 +                  target = entry
+       1958 +                  break
+       1959 +  
+       1960 +          if target is None:
+       1961 +              raise FileNotFoundError(f"File not found: 
+            + {filename}")
+       1962 +  
+       1963 +          if target.is_directory:
+       1964 +              raise DiskError(f"'{filename}' is a directory,
+            +  not a file")
+       1965 +  
+       1966 +          if target.first_cluster > 0:
+       1967 +              self.free_chain(target.first_cluster)
+       1968 +  
+       1969 +          self._delete_entry_by_name(dir_cluster, name, ext)
+       1970 +  
+       1971 +          self._write_fat()
+       1972 +  
+       1973 +      def list_files(self, path_components: list[str] | None
+            +  = None) -> list[DirectoryEntry]:
+       1974 +          """List files in a directory."""
+       1975 +          if not path_components:
+       1976 +              return self.read_directory(None)
+       1977 +  
+       1978 +          dir_cluster, entry = 
+            + self.resolve_path(path_components)
+       1979 +  
+       1980 +          if entry is not None:
+       1981 +              if entry.is_directory:
+       1982 +                  return 
+            + self.read_directory(entry.first_cluster)
+       1983 +              else:
+       1984 +                  return [entry]
+       1985 +  
+       1986 +          return self.read_directory(dir_cluster)
+       1987 +  
+       1988 +      def find_matching_files(
+       1989 +          self,
+       1990 +          path_components: list[str],
+       1991 +          recursive: bool = False
+       1992 +      ) -> list[tuple[str, DirectoryEntry]]:
+       1993 +          """
+       1994 +          Find files matching a path with optional 
+            + wildcards.
+       1995 +          Returns list of (relative_path, entry) tuples.
+       1996 +          """
+       1997 +          if not path_components:
+       1998 +              return []
+       1999 +  
+       2000 +          last_component = path_components[-1]
+       2001 +          has_wildcard = has_wildcards(last_component)
+       2002 +  
+       2003 +          if not has_wildcard and not recursive:
+       2004 +              try:
+       2005 +                  _, entry = 
+            + self.resolve_path(path_components)
+       2006 +                  if entry and not entry.is_directory:
+       2007 +                      return [(entry.full_name, entry)]
+       2008 +                  elif entry and entry.is_directory:
+       2009 +                      entries = 
+            + self.read_directory(entry.first_cluster)
+       2010 +                      return [(e.full_name, e) for e in 
+            + entries if not e.is_dot_entry and not e.is_directory]
+       2011 +              except FileNotFoundError:
+       2012 +                  return []
+       2013 +              return []
+       2014 +  
+       2015 +          if len(path_components) > 1 and not 
+            + has_wildcards(path_components[-2]):
+       2016 +              base_path = path_components[:-1]
+       2017 +              pattern = last_component
+       2018 +          elif has_wildcard:
+       2019 +              base_path = path_components[:-1] if 
+            + len(path_components) > 1 else []
+       2020 +              pattern = last_component
+       2021 +          else:
+       2022 +              base_path = path_components
+       2023 +              pattern = '*.*'
+       2024 +  
+       2025 +          if base_path:
+       2026 +              try:
+       2027 +                  dir_cluster, entry = 
+            + self.resolve_path(base_path)
+       2028 +                  if entry is not None and 
+            + entry.is_directory:
+       2029 +                      dir_cluster = entry.first_cluster
+       2030 +              except FileNotFoundError:
+       2031 +                  return []
+       2032 +          else:
+       2033 +              dir_cluster = None
+       2034 +  
+       2035 +          results = []
+       2036 +  
+       2037 +          if recursive:
+       2038 +              def recurse(cluster: int | None, rel_path: 
+            + str):
+       2039 +                  entries = self.read_directory(cluster)
+       2040 +                  for entry in entries:
+       2041 +                      if entry.is_dot_entry:
+       2042 +                          continue
+       2043 +                      entry_rel = rel_path + '\\' + 
+            + entry.full_name if rel_path else entry.full_name
+       2044 +                      if entry.is_directory:
+       2045 +                          recurse(entry.first_cluster, 
+            + entry_rel)
+       2046 +                      elif match_filename(pattern, 
+            + entry.full_name):
+       2047 +                          results.append((entry_rel, entry))
+       2048 +  
+       2049 +              recurse(dir_cluster, '')
+       2050 +          else:
+       2051 +              entries = self.read_directory(dir_cluster)
+       2052 +              for entry in entries:
+       2053 +                  if entry.is_dot_entry or 
+            + entry.is_directory:
+       2054 +                      continue
+       2055 +                  if match_filename(pattern, 
+            + entry.full_name):
+       2056 +                      results.append((entry.full_name, 
+            + entry))
+       2057 +  
+       2058 +          return results
+       2059 +  
+       2060 +      def flush(self) -> None:
+       2061 +          """Flush any pending changes to disk."""
+       2062 +          if self._fat_dirty:
+       2063 +              self._write_fat()
+       2064 +          if self._file:
+       2065 +              self._file.flush()
+       2066 +  
+       2067 +      def close(self) -> None:
+       2068 +          """Close the disk image."""
+       2069 +          self.flush()
+       2070 +          if self._file:
+       2071 +              self._file.close()
+       2072 +              self._file = None
+       2073 +  
+       2074 +      def __enter__(self):
+       2075 +          return self
+       2076 +  
+       2077 +      def __exit__(self, exc_type, exc_val, exc_tb):
+       2078 +          self.close()
+       2079 +          return False
+       2080 +  
+       2081 +  
+       2082 +  # ========================================================
+            + =====================
+       2083    # Hard Disk Partition
+       2084    # ========================================================
+              =====================
+       2085    
+
+● Step 2 is complete. Now let me update the detect_image_type() function to
+  detect IBM PC floppies.
+
+● Search(pattern: "def detect_image_type", path: "v9k_image_util.py",
+        output_mode: "content")
+  ⎿  Found 41 lines (ctrl+o to expand)
+
+● Update(v9k_image_util.py)
+  ⎿  Updated v9k_image_util.py with 32 additions and 8 removals         
+       584    
+       585    def detect_image_type(image_path: str) -> str:
+       586        """
+       587 -      Detect if image is 'floppy' or 'harddisk'.
+       588 -      Uses file size and label structure heuristics.
+       587 +      Detect if image is 'floppy', 'harddisk', or 'ibmpc'.
+       588 +      Uses file size and structure heuristics.
+       589        """
+       590        try:
+       591            file_size = os.path.getsize(image_path)
+       592        except OSError:
+       593 -          return 'floppy'  # Default to floppy on error
+       593 +          return 'floppy'  # Default to Victor 
+           +  floppy on error
+       594    
+       595 -      # Size heuristic: floppies are ~600KB-1.2MB
+           -  , hard disks are larger
+       595 +      # Size heuristic: floppies are ~600KB-1.44MB
+           +  , hard disks are larger
+       596        if file_size > 2 * 1024 * 1024:  # > 2MB likely hard 
+             disk
+       597            return 'harddisk'
+       598    
+       599 -      # Read sector 0 for label detection
+       599 +      # Read sector 0 for detection
+       600        try:
+       601            with open(image_path, 'rb') as f:
+       602                sector0 = f.read(512)
+       603    
+       604 -          if len(sector0) < 52:
+       604 +          if len(sector0) < 512:
+       605                return 'floppy'
+       606    
+       607 -          # Check for hard disk label structure
+       607 +          # Check for IBM PC FAT12 signatures
+       608 +          # 1. Boot signature 0x55AA at offset 0x1FE
+       609 +          boot_sig = struct.unpack_from('<H', sector0, 
+           + 0x1FE)[0]
+       610 +  
+       611 +          # 2. First byte is jump instruction (0xEB or 0xE9)
+       612 +          is_jump = sector0[0] in (0xEB, 0xE9)
+       613 +  
+       614 +          # 3. Valid BPB fields
+       615 +          bytes_per_sector = struct.unpack_from('<H', 
+           + sector0, 0x0B)[0]
+       616 +          sectors_per_cluster = sector0[0x0D]
+       617 +          reserved_sectors = struct.unpack_from('<H', 
+           + sector0, 0x0E)[0]
+       618 +          num_fats = sector0[0x10]
+       619 +          media_descriptor = sector0[0x15]
+       620 +  
+       621 +          # IBM PC detection criteria
+       622 +          if (boot_sig == 0xAA55 and
+       623 +              is_jump and
+       624 +              bytes_per_sector == 512 and
+       625 +              sectors_per_cluster in (1, 2, 4, 8) and
+       626 +              reserved_sectors >= 1 and
+       627 +              num_fats in (1, 2) and
+       628 +              media_descriptor >= 0xF0):
+       629 +              return 'ibmpc'
+       630 +  
+       631 +          # Check for Victor hard disk label structure
+       632            label_type = struct.unpack_from('<H', sector0, 
+             PDL_LABEL_TYPE)[0]
+       633            device_id = struct.unpack_from('<H', sector0, 
+             PDL_DEVICE_ID)[0]
+       634    
+     ...
+       615        except OSError:
+       616            pass
+       617    
+       618 -      return 'floppy'
+       618 +      return 'floppy'  # Default to Victor floppy
+       619    
+       620    
+       621    def split_internal_path(internal_path: str) -> list[str]:
+
+● Step 3 is done. Now let me update the command handlers to handle the
+  'ibmpc' type.
+
+● Search(pattern: "def cmd_list\(", path: "v9k_image_util.py", output_mode:
+        "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+● Read(v9k_image_util.py)
+  ⎿  Read 60 lines
+
+● Update(v9k_image_util.py)
+  ⎿  Updated v9k_image_util.py with 9 additions and 1 removal            
+       2906                    else:
+       2907                        display_path = 
+              f"{image_path}:{partition}:\\"
+       2908                    formatter.list_files(entries, 
+              display_path)
+       2909 +          elif image_type == 'ibmpc':
+       2910 +              # IBM PC FAT12 floppy
+       2911 +              with IBMPCDiskImage(image_path, readonly=True)
+            +  as disk:
+       2912 +                  path_components = 
+            + split_internal_path(internal_path) if internal_path else 
+            + None
+       2913 +                  entries = disk.list_files(path_components)
+       2914 +  
+       2915 +                  display_path = 
+            + f"{image_path}:\\{internal_path}" if internal_path else 
+            + f"{image_path}:\\"
+       2916 +                  formatter.list_files(entries, 
+            + display_path)
+       2917            else:
+       2918 -              # Floppy disk
+       2918 +              # Victor 9000 floppy disk
+       2919                with V9KDiskImage(image_path, readonly=True) 
+              as disk:
+       2920                    path_components = 
+              split_internal_path(internal_path) if internal_path else 
+              None
+       2921                    entries = disk.list_files(path_components)
+
+● Now let me find and update copy_from_image():
+
+● Search(pattern: "def copy_from_image\(", path: "v9k_image_util.py",
+        output_mode: "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+● Read(v9k_image_util.py)
+  ⎿  Read 80 lines
+
+● Update(v9k_image_util.py)
+  ⎿  Updated v9k_image_util.py with 4 additions                          
+       2981                disk = V9KHardDiskImage(image_path, 
+              readonly=True)
+       2982                volume = disk.get_partition(partition)
+       2983                source_display = 
+              f"{image_path}:{partition}:\\{internal_path}"
+       2984 +          elif image_type == 'ibmpc':
+       2985 +              disk = IBMPCDiskImage(image_path, 
+            + readonly=True)
+       2986 +              volume = disk
+       2987 +              source_display = 
+            + f"{image_path}:\\{internal_path}"
+       2988            else:
+       2989                disk = V9KDiskImage(image_path, readonly=True)
+       2990                volume = disk
+
+● Now let me update copy_to_image():
+
+● Search(pattern: "def copy_to_image\(", path: "v9k_image_util.py", output_mode:
+         "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+● Read(v9k_image_util.py)
+  ⎿  Read 50 lines
+
+● Update(v9k_image_util.py)
+  ⎿  Updated v9k_image_util.py with 4 additions                  
+       3112                disk = V9KHardDiskImage(image_path, 
+              readonly=False)
+       3113                volume = disk.get_partition(partition)
+       3114                dest_display = 
+              f"{image_path}:{partition}:\\{internal_path}"
+       3115 +          elif image_type == 'ibmpc':
+       3116 +              disk = IBMPCDiskImage(image_path, 
+            + readonly=False)
+       3117 +              volume = disk
+       3118 +              dest_display = 
+            + f"{image_path}:\\{internal_path}"
+       3119            else:
+       3120                disk = V9KDiskImage(image_path, 
+              readonly=False)
+       3121                volume = disk
+
+● Now let me update cmd_delete():
+
+● Search(pattern: "def cmd_delete\(", path: "v9k_image_util.py", output_mode:
+        "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+● Read(v9k_image_util.py)
+  ⎿  Read 50 lines
+
+● Update(v9k_image_util.py)
+  ⎿  Updated v9k_image_util.py with 4 additions                  
+       3166                disk = V9KHardDiskImage(image_path, 
+              readonly=False)
+       3167                volume = disk.get_partition(partition)
+       3168                delete_display = 
+              f"{image_path}:{partition}:\\{internal_path}"
+       3169 +          elif image_type == 'ibmpc':
+       3170 +              disk = IBMPCDiskImage(image_path, 
+            + readonly=False)
+       3171 +              volume = disk
+       3172 +              delete_display = 
+            + f"{image_path}:\\{internal_path}"
+       3173            else:
+       3174                disk = V9KDiskImage(image_path, 
+              readonly=False)
+       3175                volume = disk
+
+● All command handlers are updated. Now let me test with DOS622.IMG:
+
+● Bash(cd "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py list example_disks/DOS622.IMG)
+  ⎿  Directory of example_disks/DOS622.IMG:\
+
+       IO.SYS             40774  RHSA
+     … +7 lines (ctrl+o to expand)
+
+● Excellent! The list command works. Let me test subdirectory listing and
+  copy:
+
+● Bash(cd "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py list example_disks/DOS622.IMG:\VC)
+  ⎿  Directory of example_disks/DOS622.IMG:\VC
+
+       ARCHIVES.MNU         225  A
+     … +16 lines (ctrl+o to expand)
+
+● Bash(cd "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py copy example_disks/DOS622.IMG:\COMMAND.COM c:\temp\)
+  ⎿  Copied 54,645 bytes
+
+● Subdirectory listing and copy work. Let me test JSON output and verify
+  file integrity:
+
+● Bash(cd "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py list example_disks/DOS622.IMG --json)
+  ⎿  {                                       
+       "status": "success",
+       "path": "example_disks/DOS622.IMG:\\",
+     … +45 lines (ctrl+o to expand)
+
+● Bash(fc /b c:\temp\COMMAND.COM "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k
+      _image_util\example_disks\DOS622\COMMAND.COM" 2>&1 || echo "Reference file
+       may not exis…)
+  ⎿  (No content)
+
+● Let me test wildcard copy and verify Victor 9000 images still work:
+
+● Bash(cd "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py copy "example_disks/DOS622.IMG:\*.COM" c:\temp\dostest\)
+  ⎿  Error: Exit code 1
+     Error: Filesystem error: [Errno 2] No such file or directory: 'c:tempdostest
+      \\COMMAND.COM'
+
+● Bash(cd "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py list example_disks/disk.img 2>&1 | head -10)
+  ⎿  Directory of example_disks/disk.img:\
+
+       MSDOS.SYS          71952  RHS
+     … +7 lines (ctrl+o to expand)
+
+● Victor 9000 disk still works. Let me fix the wildcard copy test with a
+  proper path:
+
+● Bash(mkdir c:\temp\dostest 2>nul; cd
+      "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py copy "example_disks/DOS622.IMG:\*.COM" "…)
+  ⎿    COMMAND.COM -> c:\temp\dostest\COMMAND.COM (54,645 bytes)
+       DOSKEY.COM -> c:\temp\dostest\DOSKEY.COM (13,130 bytes)
+     Copied 2 file(s), 67,775 bytes total
+
+● Wildcard copy works. Let me test recursive copy:
+
+● Bash(mkdir c:\temp\dostest2 2>nul; cd
+      "C:\Users\Matt\Dropbox\Projects\Victor_9000\v9k_image_util" && python
+      v9k_image_util.py copy "example_disks/DOS622.IMG:\*" "c:\…)
+  ⎿    IO.SYS -> c:\temp\dostest2\IO.SYS (40,774 bytes)          
+       MSDOS.SYS -> c:\temp\dostest2\MSDOS.SYS (38,138 bytes)
+       COMMAND.COM -> c:\temp\dostest2\COMMAND.COM (54,645 bytes)
+     … +18 lines (ctrl+o to expand)
+
+● All tests pass. Now let me update the documentation:
+
+● Read(CLAUDE.md)
+  ⎿  Read 99 lines
+
+● Update(CLAUDE.md)
+  ⎿  Updated CLAUDE.md with 1 addition and 1 removal                
+       1    ## Project Overview
+       2    Victor 9000 disk image utility written in Python 3.12+.
+       3    Supports FAT12 filesystem operations including 
+           subdirectories.
+       4 -  Supports both floppy and hard disk images with multiple 
+         - partitions.
+       4 +  Supports Victor 9000 floppy/hard disk images and IBM PC 
+         + floppy images.
+       5    
+       6    ## Usage
+       7    
+
+     Tip: Use # to memorize shortcut to quickly add to CLAUDE.md
+
+● Update(CLAUDE.md)
+  ⎿  Updated CLAUDE.md with 8 additions and 1 removal                  
+       12    v9k_image_util.py list disk.img --json             # JSON 
+            output
+       13    ```
+       14    
+       15 -  ### List files (Hard Disk)
+       15 +  ### List files (IBM PC Floppy)
+       16    ```bash
+       17 +  v9k_image_util.py list DOS622.IMG                  # List 
+          + root directory
+       18 +  v9k_image_util.py list DOS622.IMG:\SUBDIR          # List 
+          + subdirectory
+       19 +  v9k_image_util.py list DOS622.IMG --json           # JSON 
+          + output
+       20 +  ```
+       21 +  
+       22 +  ### List files (Victor Hard Disk)
+       23 +  ```bash
+       24    v9k_image_util.py list vichd.img                   # List 
+            partitions
+       25    v9k_image_util.py list vichd.img:0:\               # List 
+            root of partition 0
+       26    v9k_image_util.py list vichd.img:1:\SUBDIR         # List 
+            subdirectory on partition 1
+
+     Tip: Use # to memorize shortcut to quickly add to CLAUDE.md
+
+● Update(CLAUDE.md)
+  ⎿  Updated CLAUDE.md with 2 additions and 1 removal                
+       67    - Full subdirectory navigation
+       68    - JSON output mode
+       69    - 8.3 filename validation (no LFN support)
+       70 -  - Hard disk support with multiple partitions
+       70 +  - Victor 9000 hard disk support with multiple partitions
+       71 +  - IBM PC FAT12 floppy support (auto-detected)
+       72    
+       73    ## Technical Notes
+       74    
+
+     Tip: Use # to memorize shortcut to quickly add to CLAUDE.md
+
+● Update(CLAUDE.md)
+  ⎿  Updated CLAUDE.md with 9 additions and 2 removals                   
+       72    
+       73    ## Technical Notes
+       74    
+       75 -  ### Floppy Disks
+       75 +  ### Victor 9000 Floppy Disks
+       76    - Victor 9000 uses 4 sectors per cluster (2048 bytes)
+       77    - FAT12 filesystem with 12-bit cluster entries
+       78    - Disk geometry detected from boot sector flags (bit 0 = 
+            double-sided)
+       79    - Double-sided: FAT at sectors 1-4, directory at 5-12, data 
+            at 13+
+       80    - Single-sided: FAT at sectors 1-2, directory at 3-10, data 
+            at 11+
+       81    
+       82 -  ### Hard Disks
+       82 +  ### IBM PC Floppy Disks
+       83 +  - Standard FAT12 with BIOS Parameter Block (BPB) in boot 
+          + sector
+       84 +  - Supports 360KB, 720KB, 1.2MB, 1.44MB formats 
+          + (auto-detected from BPB)
+       85 +  - Variable sectors per cluster (1-2, read from BPB)
+       86 +  - Boot signature 0x55AA at offset 0x1FE identifies IBM PC 
+          + format
+       87 +  - All geometry parameters read from BPB fields
+       88 +  
+       89 +  ### Victor 9000 Hard Disks
+       90    - Physical disk label at sector 0 with virtual volume list
+       91    - Each partition has its own virtual volume label
+       92    - Variable sectors per cluster (typically 64 sectors = 32KB)
+
+     Tip: Use # to memorize shortcut to quickly add to CLAUDE.md
+
+● Update(CLAUDE.md)
+  ⎿  Updated CLAUDE.md with 6 additions and 1 removal                  
+        91    - Each partition has its own virtual volume label
+        92    - Variable sectors per cluster (typically 64 sectors = 
+             32KB)
+        93    - FAT12 with size based on partition capacity
+        94 -  - Image type auto-detected (size >2MB or label structure)
+        94    
+        95 +  ### Image Type Auto-Detection
+        96 +  - File size >2MB: Victor hard disk
+        97 +  - Boot signature 0x55AA + valid BPB: IBM PC floppy
+        98 +  - Victor hard disk label structure: Victor hard disk
+        99 +  - Default: Victor 9000 floppy
+       100 +  
+       101    ## Key Files
+       102    - `v9k_image_util.py` - Main utility implementation
+       103    - `victor_boot_sector_layout.md` - Boot sector structure 
+             reference
+
+     Tip: Use # to memorize shortcut to quickly add to CLAUDE.md
+
+● Implementation complete. Here's a summary of the changes:
+
+  Summary
+
+  Files Modified
+
+  - v9k_image_util.py - Added ~600 lines of new code
+
+  New Components
+
+  1. IBMPCBIOSParameterBlock dataclass (lines 370-459)
+    - Parses BIOS Parameter Block from IBM PC boot sector
+    - Validates boot signature (0x55AA) and BPB fields
+    - Calculates FAT/directory/data locations
+  2. IBMPCDiskImage class (lines 1475-2079)
+    - Full FAT12 implementation for IBM PC floppies
+    - Same interface as V9KDiskImage
+    - Variable sectors-per-cluster from BPB
+  3. Updated detect_image_type() (lines 585-642)
+    - Now returns 'floppy', 'harddisk', or 'ibmpc'
+    - IBM PC detection: boot signature + BPB validation
+  4. Updated command handlers
+    - cmd_list(), copy_from_image(), copy_to_image(), cmd_delete()
+    - All handle the new 'ibmpc' type
+
+  Verified Tests
+
+  list DOS622.IMG              # Works
+  list DOS622.IMG:\VC          # Subdirectory works
+  copy DOS622.IMG:\*.COM       # Wildcard copy works  
+  copy DOS622.IMG:\* -r        # Recursive copy works
+  list disk.img                # Victor 9000 still works
+
+  Supported IBM PC Formats
+
+  - 360KB (5.25" DD)
+  - 720KB (3.5" DD)
+  - 1.2MB (5.25" HD)
+  - 1.44MB (3.5" HD)
+
+  All formats are auto-detected from the BPB fields.
+
+
+

@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec.bak
+
+# Nuitka
+*.build/
+*.dist/
+*.onefile-build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test/temp files
+*.tmp
+*.temp
+*.bak
+
+# Claude Code settings (local)
+.claude/
+
+# Example disks (too large for git)
+example_disks/
+
+# User preferences (GUI)
+vtg_prefs.json
