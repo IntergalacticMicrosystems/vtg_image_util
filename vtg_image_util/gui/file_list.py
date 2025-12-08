@@ -22,9 +22,10 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
 
     # Column indices
     COL_NAME = 0
-    COL_SIZE = 1
-    COL_DATE = 2
-    COL_ATTR = 3
+    COL_EXT = 1
+    COL_SIZE = 2
+    COL_DATE = 3
+    COL_ATTR = 4
 
     def __init__(self, parent):
         wx.ListCtrl.__init__(
@@ -42,7 +43,8 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
         self._filter_text = ""
 
         # Set up columns
-        self.InsertColumn(self.COL_NAME, "Name", width=200)
+        self.InsertColumn(self.COL_NAME, "Name", width=160)
+        self.InsertColumn(self.COL_EXT, "Ext", width=50)
         self.InsertColumn(self.COL_SIZE, "Size", width=100, format=wx.LIST_FORMAT_RIGHT)
         self.InsertColumn(self.COL_DATE, "Date", width=120)
         self.InsertColumn(self.COL_ATTR, "Attr", width=60)
@@ -179,7 +181,9 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
         # Sort function based on column
         def get_sort_key(entry):
             if self._sort_column == self.COL_NAME:
-                return self._get_name(entry).lower()
+                return self._get_name_only(entry).lower()
+            elif self._sort_column == self.COL_EXT:
+                return self._get_extension(entry).lower()
             elif self._sort_column == self.COL_SIZE:
                 return self._get_size(entry)
             elif self._sort_column == self.COL_DATE:
@@ -222,7 +226,9 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
             return ""
 
         if column == self.COL_NAME:
-            return self._get_name(entry)
+            return self._get_name_only(entry)
+        elif column == self.COL_EXT:
+            return self._get_extension(entry)
         elif column == self.COL_SIZE:
             return self._get_size_display(entry)
         elif column == self.COL_DATE:
@@ -252,10 +258,28 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
 
     # Helper methods for getting display values
     def _get_name(self, entry: DirectoryEntry | CPMFileInfo) -> str:
-        """Get the display name for an entry."""
+        """Get the full display name for an entry (with extension)."""
         if isinstance(entry, CPMFileInfo):
             return entry.full_name
         return entry.full_name
+
+    def _get_name_only(self, entry: DirectoryEntry | CPMFileInfo) -> str:
+        """Get just the name part (without extension) for an entry."""
+        if isinstance(entry, DirectoryEntry):
+            return entry.name.rstrip()
+        elif isinstance(entry, CPMFileInfo):
+            return entry.filename.rstrip()
+        return ""
+
+    def _get_extension(self, entry: DirectoryEntry | CPMFileInfo) -> str:
+        """Get the extension for an entry."""
+        if isinstance(entry, DirectoryEntry):
+            if entry.is_directory:
+                return ""
+            return entry.extension.rstrip()
+        elif isinstance(entry, CPMFileInfo):
+            return entry.extension.rstrip() if entry.extension else ""
+        return ""
 
     def _get_size(self, entry: DirectoryEntry | CPMFileInfo) -> int:
         """Get the size for sorting."""
