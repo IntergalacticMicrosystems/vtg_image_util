@@ -133,10 +133,13 @@ class DragDropManager:
             return False
 
     def _cleanup_temp_files(self):
-        """Clean up temporary files from previous drag operations."""
+        """Clean up temporary files and directories from previous drag operations."""
+        import shutil
         for path in self._temp_files:
             try:
-                if os.path.exists(path):
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                elif os.path.exists(path):
                     os.remove(path)
             except OSError:
                 pass  # Ignore cleanup errors

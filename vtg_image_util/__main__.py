@@ -80,9 +80,11 @@ def main() -> int:
     copy_parser.add_argument('--json', action='store_true', help='Output in JSON format')
 
     # Delete command
-    delete_parser = subparsers.add_parser('delete', help='Delete file from disk image',
+    delete_parser = subparsers.add_parser('delete', help='Delete file or directory from disk image',
                                           epilog='Use --help-syntax for path syntax.')
-    delete_parser.add_argument('path', help='File to delete (image.img:\\FILE or image.img:N:\\FILE)')
+    delete_parser.add_argument('path', help='File or directory to delete (image.img:\\FILE or image.img:N:\\FILE)')
+    delete_parser.add_argument('-r', '--recursive', action='store_true',
+                               help='Delete directories and their contents recursively')
     delete_parser.add_argument('--json', action='store_true', help='Output in JSON format')
 
     # Attr command

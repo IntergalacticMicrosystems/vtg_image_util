@@ -727,10 +727,10 @@ class MainFrame(wx.Frame):
         if not selected:
             return
 
-        # Get paths of selected files (excluding parent entry and directories)
+        # Get paths of selected files and directories (excluding parent entry)
         paths = []
         for idx, entry in selected:
-            if entry is not None and not (isinstance(entry, DirectoryEntry) and entry.is_directory):
+            if entry is not None:
                 # Build full path
                 full_path = list(self._current_path)
                 full_path.append(entry.full_name)
@@ -740,7 +740,7 @@ class MainFrame(wx.Frame):
             self._drag_manager.start_drag(paths)
 
     def _on_copy_from(self, event):
-        """Copy selected files from image to local disk."""
+        """Copy selected files/directories from image to local disk."""
         selected = self._file_panel.file_list.get_selected_entries()
         if not selected:
             return
@@ -764,17 +764,19 @@ class MainFrame(wx.Frame):
                 return
             dest_dir = dlg.GetPath()
 
-        self._copy_files_from_image(files_to_copy, dest_dir)
+        self._copy_files_from_image(files_to_copy, dest_dir, recursive=True)
 
     def _copy_files_from_image(
         self,
         files: list[tuple[int, DirectoryEntry | CPMFileInfo]],
-        dest_dir: str
+        dest_dir: str,
+        recursive: bool = False
     ):
-        """Copy files from the disk image to a local directory."""
+        """Copy files and directories from the disk image to a local directory."""
         disk = self._get_current_disk()
         errors = []
         copied = 0
+        dirs_created = 0
 
         progress = ProgressDialog(
             "Copying Files",
@@ -793,15 +795,30 @@ class MainFrame(wx.Frame):
                     source_path = list(self._current_path)
                     source_path.append(entry.full_name)
 
-                    # Read file data
-                    data = disk.read_file(source_path)
+                    if isinstance(entry, DirectoryEntry) and entry.is_directory:
+                        if recursive:
+                            # Recursively copy directory
+                            sub_copied, sub_dirs, sub_errors = self._copy_dir_from_image_recursive(
+                                disk, source_path, dest_dir, entry.full_name
+                            )
+                            copied += sub_copied
+                            dirs_created += sub_dirs
+                            errors.extend(sub_errors)
+                        else:
+                            # Just create the directory
+                            dir_path = os.path.join(dest_dir, entry.full_name)
+                            os.makedirs(dir_path, exist_ok=True)
+                            dirs_created += 1
+                    else:
+                        # Read file data
+                        data = disk.read_file(source_path)
 
-                    # Write to local disk
-                    dest_path = os.path.join(dest_dir, entry.full_name)
-                    with open(dest_path, 'wb') as f:
-                        f.write(data)
+                        # Write to local disk
+                        dest_path = os.path.join(dest_dir, entry.full_name)
+                        with open(dest_path, 'wb') as f:
+                            f.write(data)
 
-                    copied += 1
+                        copied += 1
 
                 except V9KError as e:
                     errors.append(f"{entry.full_name}: {e}")
@@ -813,16 +830,85 @@ class MainFrame(wx.Frame):
 
         # Show result
         if errors:
-            msg = f"Copied {copied} file(s) with {len(errors)} error(s):\n\n"
+            msg = f"Copied {copied} file(s)"
+            if dirs_created > 0:
+                msg += f", {dirs_created} folder(s)"
+            msg += f" with {len(errors)} error(s):\n\n"
             msg += "\n".join(errors[:10])
             if len(errors) > 10:
                 msg += f"\n... and {len(errors) - 10} more errors"
             wx.MessageBox(msg, "Copy Complete", wx.OK | wx.ICON_WARNING, self)
         else:
-            self._statusbar.SetStatusText(f"Copied {copied} file(s)", 0)
+            msg = f"Copied {copied} file(s)"
+            if dirs_created > 0:
+                msg += f", {dirs_created} folder(s)"
+            self._statusbar.SetStatusText(msg, 0)
+
+    def _copy_dir_from_image_recursive(
+        self,
+        disk,
+        source_path: list[str],
+        dest_base: str,
+        rel_path: str
+    ) -> tuple[int, int, list[str]]:
+        """
+        Recursively copy a directory from the disk image.
+
+        Returns:
+            (files_copied, dirs_created, errors)
+        """
+        copied = 0
+        dirs_created = 0
+        errors = []
+
+        # Create the directory locally
+        local_dir = os.path.join(dest_base, rel_path)
+        try:
+            os.makedirs(local_dir, exist_ok=True)
+            dirs_created += 1
+        except OSError as e:
+            errors.append(f"{rel_path}: {e}")
+            return copied, dirs_created, errors
+
+        # List directory contents
+        try:
+            entries = disk.list_files(source_path)
+        except V9KError as e:
+            errors.append(f"{rel_path}: {e}")
+            return copied, dirs_created, errors
+
+        for entry in entries:
+            if entry.is_dot_entry or entry.is_volume_label:
+                continue
+
+            entry_source = source_path + [entry.full_name]
+            entry_rel = os.path.join(rel_path, entry.full_name)
+
+            if entry.is_directory:
+                # Recurse into subdirectory
+                sub_copied, sub_dirs, sub_errors = self._copy_dir_from_image_recursive(
+                    disk, entry_source, dest_base, entry_rel
+                )
+                copied += sub_copied
+                dirs_created += sub_dirs
+                errors.extend(sub_errors)
+            else:
+                # Copy file
+                try:
+                    data = disk.read_file(entry_source)
+                    dest_path = os.path.join(dest_base, entry_rel)
+                    with open(dest_path, 'wb') as f:
+                        f.write(data)
+                    copied += 1
+                except V9KError as e:
+                    errors.append(f"{entry_rel}: {e}")
+                except OSError as e:
+                    errors.append(f"{entry_rel}: {e}")
+
+        return copied, dirs_created, errors
 
     def _on_copy_to(self, event):
-        """Copy local files to disk image."""
+        """Copy local files or directories to disk image."""
         if self._readonly:
             wx.MessageBox(
                 "Disk image is read-only",
@@ -832,17 +918,41 @@ class MainFrame(wx.Frame):
             )
             return
 
-        # Ask for source files
-        with wx.FileDialog(
+        # Ask user whether to copy files or a folder
+        dlg = wx.MessageDialog(
             self,
-            "Select Files to Copy",
-            style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST
-        ) as dlg:
-            if dlg.ShowModal() != wx.ID_OK:
-                return
-            source_paths = dlg.GetPaths()
+            "What would you like to copy to the disk image?",
+            "Copy To Image",
+            wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION
+        )
+        dlg.SetYesNoLabels("Files", "Folder")
+        result = dlg.ShowModal()
+        dlg.Destroy()
 
-        self._copy_files_to_image(source_paths)
+        if result == wx.ID_CANCEL:
+            return
+        elif result == wx.ID_YES:
+            # Copy files
+            with wx.FileDialog(
+                self,
+                "Select Files to Copy",
+                style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST
+            ) as file_dlg:
+                if file_dlg.ShowModal() != wx.ID_OK:
+                    return
+                source_paths = file_dlg.GetPaths()
+            self._copy_files_to_image(source_paths)
+        else:
+            # Copy folder
+            with wx.DirDialog(
+                self,
+                "Select Folder to Copy",
+                style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST
+            ) as dir_dlg:
+                if dir_dlg.ShowModal() != wx.ID_OK:
+                    return
+                source_dir = dir_dlg.GetPath()
+            self._copy_dir_to_image(source_dir)
 
     def _copy_files_to_image(self, source_paths: list[str]):
         """Copy local files to the disk image."""
@@ -912,8 +1022,146 @@ class MainFrame(wx.Frame):
         else:
             self._statusbar.SetStatusText(f"Copied {copied} file(s)", 0)
 
+    def _copy_dir_to_image(self, source_dir: str):
+        """Copy a local directory (recursively) to the disk image."""
+        if self._readonly:
+            return
+
+        disk = self._get_current_disk()
+
+        # Get the folder name and create it on the disk
+        folder_name = os.path.basename(source_dir).upper()
+
+        # Validate folder name for DOS 8.3 format
+        try:
+            name, ext = validate_filename(folder_name)
+            dos_name = name.rstrip() + ('.' + ext.rstrip() if ext.rstrip() else '')
+        except Exception:
+            dos_name = folder_name[:8]  # Truncate to 8 chars
+
+        # Build destination path (in current directory)
+        dest_path = list(self._current_path) + [dos_name]
+
+        # Count total items for progress
+        total_items = sum(1 for _ in self._count_items_recursive(source_dir))
+
+        progress = ProgressDialog(
+            "Copying Folder",
+            f"Copying {folder_name}...",
+            max(total_items, 1),
+            self
+        )
+
+        errors = []
+        copied = 0
+        dirs_created = 0
+        current_item = [0]  # Use list to allow modification in nested function
+
+        try:
+            # Create the top-level directory
+            try:
+                disk.create_directory(dest_path)
+                dirs_created += 1
+            except V9KError as e:
+                # Directory might already exist
+                if "exists" not in str(e).lower():
+                    errors.append(f"{dos_name}: {e}")
+
+            # Recursively copy contents
+            self._copy_dir_contents_to_image(
+                disk, source_dir, dest_path, progress, current_item, errors
+            )
+            copied = current_item[0]
+
+        finally:
+            progress.Destroy()
+
+        # Refresh listing
+        self._refresh_file_list()
+
+        # Mark as dirty if anything was copied
+        if copied > 0 or dirs_created > 0:
+            self._mark_dirty()
+
+        # Show result
+        if errors:
+            msg = f"Copied {copied} file(s), {dirs_created} folder(s) with {len(errors)} error(s):\n\n"
+            msg += "\n".join(errors[:10])
+            if len(errors) > 10:
+                msg += f"\n... and {len(errors) - 10} more errors"
+            wx.MessageBox(msg, "Copy Complete", wx.OK | wx.ICON_WARNING, self)
+        else:
+            self._statusbar.SetStatusText(f"Copied {copied} file(s), {dirs_created} folder(s)", 0)
+
+    def _count_items_recursive(self, path: str):
+        """Count all files and directories recursively."""
+        for item in os.listdir(path):
+            item_path = os.path.join(path, item)
+            yield item_path
+            if os.path.isdir(item_path):
+                yield from self._count_items_recursive(item_path)
+
+    def _copy_dir_contents_to_image(
+        self,
+        disk,
+        source_dir: str,
+        dest_path: list[str],
+        progress: ProgressDialog,
+        current_item: list[int],
+        errors: list[str]
+    ):
+        """Recursively copy directory contents to disk image."""
+        try:
+            items = os.listdir(source_dir)
+        except OSError as e:
+            errors.append(f"{source_dir}: {e}")
+            return
+
+        for item_name in items:
+            item_path = os.path.join(source_dir, item_name)
+
+            # Update progress
+            if not progress.update(current_item[0], f"Copying {item_name}..."):
+                return  # Cancelled
+
+            # Convert to DOS 8.3 name
+            try:
+                name, ext = validate_filename(item_name.upper())
+                dos_name = name.rstrip() + ('.' + ext.rstrip() if ext.rstrip() else '')
+            except Exception:
+                if os.path.isdir(item_path):
+                    dos_name = item_name.upper()[:8]
+                else:
+                    dos_name = item_name.upper()[:12]
+
+            item_dest = dest_path + [dos_name]
+
+            if os.path.isdir(item_path):
+                # Create directory and recurse
+                try:
+                    disk.create_directory(item_dest)
+                except V9KError as e:
+                    if "exists" not in str(e).lower():
+                        errors.append(f"{dos_name}: {e}")
+                        continue
+
+                self._copy_dir_contents_to_image(
+                    disk, item_path, item_dest, progress, current_item, errors
+                )
+            else:
+                # Copy file
+                try:
+                    with open(item_path, 'rb') as f:
+                        data = f.read()
+                    disk.write_file(item_dest, data)
+                    current_item[0] += 1
+                except V9KError as e:
+                    errors.append(f"{dos_name}: {e}")
+                except OSError as e:
+                    errors.append(f"{item_name}: {e}")
+
     def _on_delete(self, event):
-        """Delete selected files."""
+        """Delete selected files and directories."""
         if self._readonly:
             wx.MessageBox(
                 "Disk image is read-only",
@@ -927,30 +1175,43 @@ class MainFrame(wx.Frame):
         if not selected:
             return
 
-        # Filter out parent entry and directories
-        files_to_delete = [
+        # Filter out parent entry
+        items_to_delete = [
             (idx, entry) for idx, entry in selected
-            if entry is not None and not (isinstance(entry, DirectoryEntry) and entry.is_directory)
+            if entry is not None
         ]
 
-        if not files_to_delete:
-            wx.MessageBox(
-                "Please select files to delete (not directories)",
-                "Delete",
-                wx.OK | wx.ICON_INFORMATION,
-                self
-            )
+        if not items_to_delete:
             return
+
+        # Separate files and directories
+        files = [(idx, e) for idx, e in items_to_delete
+                 if not (isinstance(e, DirectoryEntry) and e.is_directory)]
+        dirs = [(idx, e) for idx, e in items_to_delete
+                if isinstance(e, DirectoryEntry) and e.is_directory]
 
         # Confirm deletion (if enabled in preferences)
         if self._prefs.get('confirm_delete', True):
-            names = [entry.full_name for _, entry in files_to_delete]
+            names = [entry.full_name + ('\\' if isinstance(entry, DirectoryEntry) and entry.is_directory else '')
+                     for _, entry in items_to_delete]
             if len(names) == 1:
-                msg = f"Delete '{names[0]}'?"
+                item_type = "folder" if dirs else "file"
+                msg = f"Delete {item_type} '{names[0]}'?"
+                if dirs:
+                    msg += "\n\nThis will delete the folder and all its contents."
             else:
-                msg = f"Delete {len(names)} files?\n\n" + "\n".join(names[:10])
+                file_count = len(files)
+                dir_count = len(dirs)
+                parts = []
+                if file_count > 0:
+                    parts.append(f"{file_count} file(s)")
+                if dir_count > 0:
+                    parts.append(f"{dir_count} folder(s)")
+                msg = f"Delete {' and '.join(parts)}?\n\n" + "\n".join(names[:10])
                 if len(names) > 10:
                     msg += f"\n... and {len(names) - 10} more"
+                if dirs:
+                    msg += "\n\nFolders will be deleted with all their contents."
 
             result = wx.MessageBox(
                 msg,
@@ -962,34 +1223,57 @@ class MainFrame(wx.Frame):
             if result != wx.YES:
                 return
 
-        # Delete files
+        # Delete items
         disk = self._get_current_disk()
         errors = []
-        deleted = 0
+        deleted_files = 0
+        deleted_dirs = 0
 
-        for idx, entry in files_to_delete:
+        # Delete files first
+        for idx, entry in files:
             try:
                 path = list(self._current_path)
                 path.append(entry.full_name)
                 disk.delete_file(path)
-                deleted += 1
+                deleted_files += 1
             except V9KError as e:
                 errors.append(f"{entry.full_name}: {e}")
+
+        # Delete directories (recursively)
+        for idx, entry in dirs:
+            try:
+                path = list(self._current_path)
+                path.append(entry.full_name)
+                disk.delete_directory(path, recursive=True)
+                deleted_dirs += 1
+            except V9KError as e:
+                errors.append(f"{entry.full_name}\\: {e}")
 
         # Refresh listing
         self._refresh_file_list()
 
-        # Mark as dirty if any files were deleted
-        if deleted > 0:
+        # Mark as dirty if anything was deleted
+        if deleted_files > 0 or deleted_dirs > 0:
             self._mark_dirty()
 
         # Show result
+        total = deleted_files + deleted_dirs
         if errors:
-            msg = f"Deleted {deleted} file(s) with {len(errors)} error(s):\n\n"
+            parts = []
+            if deleted_files > 0:
+                parts.append(f"{deleted_files} file(s)")
+            if deleted_dirs > 0:
+                parts.append(f"{deleted_dirs} folder(s)")
+            msg = f"Deleted {', '.join(parts) if parts else '0 items'} with {len(errors)} error(s):\n\n"
             msg += "\n".join(errors)
             wx.MessageBox(msg, "Delete Complete", wx.OK | wx.ICON_WARNING, self)
         else:
-            self._statusbar.SetStatusText(f"Deleted {deleted} file(s)", 0)
+            parts = []
+            if deleted_files > 0:
+                parts.append(f"{deleted_files} file(s)")
+            if deleted_dirs > 0:
+                parts.append(f"{deleted_dirs} folder(s)")
+            self._statusbar.SetStatusText(f"Deleted {', '.join(parts)}", 0)
 
     def _on_properties(self, event):
         """Show properties for selected file."""
@@ -1029,13 +1313,13 @@ class MainFrame(wx.Frame):
     # Drag and drop callbacks
     def _export_files_for_drag(self, internal_paths: list[str]) -> list[str]:
         """
-        Export files to temporary location for drag operation.
+        Export files and directories to temporary location for drag operation.
 
         Args:
             internal_paths: List of internal paths (e.g., ['SUBDIR\\FILE.COM'])
 
         Returns:
-            List of temporary file paths
+            List of temporary file/directory paths
         """
         if not self._disk:
             return []
@@ -1048,13 +1332,25 @@ class MainFrame(wx.Frame):
             try:
                 # Parse path
                 parts = internal_path.split('\\')
-                filename = parts[-1] if parts else internal_path
+                name = parts[-1] if parts else internal_path
+
+                # Check if it's a directory or file using find_entry
+                try:
+                    entry = disk.find_entry(parts)
+                    if entry and entry.is_directory:
+                        # Export directory recursively
+                        dir_temp_path = os.path.join(temp_dir, name)
+                        self._export_dir_for_drag(disk, parts, dir_temp_path)
+                        temp_paths.append(dir_temp_path)
+                        continue
+                except Exception:
+                    pass
 
                 # Read file
                 data = disk.read_file(parts)
 
                 # Write to temp
-                temp_path = os.path.join(temp_dir, filename)
+                temp_path = os.path.join(temp_dir, name)
                 with open(temp_path, 'wb') as f:
                     f.write(data)
                 temp_paths.append(temp_path)
@@ -1063,6 +1359,32 @@ class MainFrame(wx.Frame):
                 continue  # Skip files that can't be exported
 
         return temp_paths
+
+    def _export_dir_for_drag(self, disk, source_path: list[str], dest_dir: str):
+        """Recursively export a directory from the disk image for drag operation."""
+        os.makedirs(dest_dir, exist_ok=True)
+
+        try:
+            entries = disk.list_files(source_path)
+        except Exception:
+            return
+
+        for entry in entries:
+            if entry.is_dot_entry or entry.is_volume_label:
+                continue
+
+            entry_source = source_path + [entry.full_name]
+            entry_dest = os.path.join(dest_dir, entry.full_name)
+
+            if entry.is_directory:
+                self._export_dir_for_drag(disk, entry_source, entry_dest)
+            else:
+                try:
+                    data = disk.read_file(entry_source)
+                    with open(entry_dest, 'wb') as f:
+                        f.write(data)
+                except Exception:
+                    continue
 
     def _is_disk_image_file(self, path: str) -> bool:
         """
@@ -1115,7 +1437,7 @@ class MainFrame(wx.Frame):
                 wx.CallAfter(self._handle_dropped_image_with_open, dropped_image, local_paths)
                 return True
 
-        # Not a single disk image - treat as files to copy into current image
+        # Not a single disk image - treat as files/folders to copy into current image
         if not self._disk or self._readonly:
             if not self._disk:
                 wx.MessageBox(
@@ -1134,7 +1456,18 @@ class MainFrame(wx.Frame):
                 )
             return False
 
-        self._copy_files_to_image(local_paths)
+        # Separate files and directories
+        files = [p for p in local_paths if os.path.isfile(p)]
+        dirs = [p for p in local_paths if os.path.isdir(p)]
+
+        # Copy files first
+        if files:
+            self._copy_files_to_image(files)
+
+        # Then copy directories
+        for dir_path in dirs:
+            self._copy_dir_to_image(dir_path)
+
         return True
 
     def _handle_dropped_image_with_open(self, dropped_image: str, local_paths: list[str]):

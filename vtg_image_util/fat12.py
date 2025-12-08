@@ -675,7 +675,7 @@ class FAT12Base(ABC):
         results = []
 
         if recursive:
-            # Recursive search
+            # Recursive search - include directories in results
             def recurse(cluster: int | None, rel_path: str):
                 entries = self.read_directory(cluster)
                 for entry in entries:
@@ -683,6 +683,8 @@ class FAT12Base(ABC):
                         continue
                     entry_rel = rel_path + '\\' + entry.full_name if rel_path else entry.full_name
                     if entry.is_directory:
+                        # Add directory to results, then recurse into it
+                        results.append((entry_rel, entry))
                         recurse(entry.first_cluster, entry_rel)
                     elif match_filename(pattern, entry.full_name):
                         results.append((entry_rel, entry))

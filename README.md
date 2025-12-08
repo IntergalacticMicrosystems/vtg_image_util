@@ -110,11 +110,16 @@ vtg_image_util copy vichd.img:0:\FILE.COM ./
 vtg_image_util copy localfile.txt vichd.img:1:\FILE.TXT
 ```
 
-#### Delete Files
+#### Delete Files and Directories
 
 ```bash
+# Delete a file
 vtg_image_util delete disk.img:\FILE.COM
 vtg_image_util delete vichd.img:0:\FILE.COM
+
+# Delete a directory and its contents
+vtg_image_util delete disk.img:\SUBDIR -r
+vtg_image_util delete vichd.img:0:\MYDIR -r
 ```
 
 #### Create/Remove Directories
@@ -210,7 +215,8 @@ python -m vtg_image_util.gui disk.img
 **GUI Features:**
 - Open/Save/Close disk images
 - Browse directories with file list
-- Copy files via drag-and-drop or menu
+- Copy files and folders via drag-and-drop or menu
+- Recursive folder copy in both directions (to/from disk image)
 - Delete files with confirmation
 - View file properties
 - Search/filter files (supports wildcards)

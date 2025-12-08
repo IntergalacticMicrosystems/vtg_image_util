@@ -239,18 +239,18 @@ def copy_from_image(
                 copied_files = []
 
                 for rel_path, entry in matching_files:
+                    # Build destination path, preserving subdirectory structure
+                    dest_item = dest_dir / rel_path.replace('\\', os.sep)
+
                     if entry.is_directory:
+                        # Create the directory
+                        dest_item.mkdir(parents=True, exist_ok=True)
+                        if not formatter.json_mode:
+                            print(f"  {rel_path}\\ -> {dest_item}\\ (directory)")
                         continue
 
-                    # Build destination path, preserving subdirectory structure
-                    if '\\' in rel_path:
-                        # Has subdirectory - create it
-                        rel_dir = rel_path.rsplit('\\', 1)[0]
-                        file_dest_dir = dest_dir / rel_dir.replace('\\', os.sep)
-                        file_dest_dir.mkdir(parents=True, exist_ok=True)
-                        dest_file = file_dest_dir / entry.full_name
-                    else:
-                        dest_file = dest_dir / entry.full_name
+                    # Ensure parent directory exists
+                    dest_item.parent.mkdir(parents=True, exist_ok=True)
 
                     # Read and write the file
                     if '\\' in rel_path:
@@ -259,18 +259,18 @@ def copy_from_image(
                         read_path = [rel_path]
 
                     data = volume.read_file(read_path)
-                    dest_file.write_bytes(data)
+                    dest_item.write_bytes(data)
 
                     total_files += 1
                     total_bytes += len(data)
                     copied_files.append({
                         "name": rel_path,
                         "size": len(data),
-                        "dest": str(dest_file)
+                        "dest": str(dest_item)
                     })
 
                     if not formatter.json_mode:
-                        print(f"  {rel_path} -> {dest_file} ({len(data):,} bytes)")
+                        print(f"  {rel_path} -> {dest_item} ({len(data):,} bytes)")
 
                 formatter.success(
                     f"Copied {total_files} file(s), {total_bytes:,} bytes total",
@@ -466,10 +466,12 @@ def cmd_delete(args, formatter: OutputFormatter) -> int:
         formatter.error(f"Invalid disk image path: {args.path}")
         return 1
 
+    recursive = getattr(args, 'recursive', False)
+
     try:
         path_components = split_internal_path(internal_path)
         if not path_components:
-            formatter.error("No file specified to delete")
+            formatter.error("No file or directory specified to delete")
             return 1
 
         image_type = detect_image_type(image_path)
@@ -495,12 +497,29 @@ def cmd_delete(args, formatter: OutputFormatter) -> int:
             delete_display = f"{image_path}:\\{internal_path}"
 
         try:
-            volume.delete_file(path_components)
+            # Check if it's a directory
+            is_directory = False
+            try:
+                entry = volume.find_entry(path_components)
+                if entry and entry.is_directory:
+                    is_directory = True
+            except Exception:
+                pass
 
-            formatter.success(
-                f"Deleted {internal_path}",
-                deleted=delete_display
-            )
+            if is_directory:
+                # Delete directory
+                volume.delete_directory(path_components, recursive=recursive)
+                formatter.success(
+                    f"Deleted directory {internal_path}",
+                    deleted=delete_display
+                )
+            else:
+                # Delete file
+                volume.delete_file(path_components)
+                formatter.success(
+                    f"Deleted {internal_path}",
+                    deleted=delete_display
+                )
         finally:
             disk.close()
 
