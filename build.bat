@@ -68,16 +68,18 @@ if exist "dist\vtg_image_util_gui.exe" (
 REM Create distribution zip
 echo.
 echo Creating distribution package...
-set ZIPNAME=vtg_image_util_v%VERSION%.zip
 
-if exist "dist\%ZIPNAME%" del "dist\%ZIPNAME%"
+if exist "windows-exe.zip" del "windows-exe.zip"
+
+REM Wait for build process to fully release files
+timeout /t 2 /nobreak >nul
 
 REM Use PowerShell to create zip
-powershell -Command "Compress-Archive -Path 'dist\vtg_image_util.exe', 'dist\vtg_image_util_gui.exe' -DestinationPath 'dist\%ZIPNAME%'" 2>nul
+powershell -NoProfile -Command "Add-Type -Assembly 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::CreateFromDirectory('dist', 'windows-exe.zip')"
 
-if exist "dist\%ZIPNAME%" (
-    echo [OK] Package: dist\%ZIPNAME%
-    for %%A in ("dist\%ZIPNAME%") do echo       Size: %%~zA bytes
+if exist "windows-exe.zip" (
+    echo [OK] Package: windows-exe.zip
+    for %%A in ("windows-exe.zip") do echo       Size: %%~zA bytes
 ) else (
     echo [WARN] Could not create zip package
 )
