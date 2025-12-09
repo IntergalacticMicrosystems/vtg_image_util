@@ -37,6 +37,9 @@ from .preferences_dialog import PreferencesDialog
 ID_SAVE = wx.NewIdRef()
 ID_SAVE_CLOSE = wx.NewIdRef()
 ID_CLOSE = wx.NewIdRef()
+ID_COPY = wx.NewIdRef()
+ID_PASTE = wx.NewIdRef()
+ID_SELECT_ALL = wx.NewIdRef()
 ID_PROPERTIES = wx.NewIdRef()
 ID_PREFERENCES = wx.NewIdRef()
 ID_RECENT_CLEAR = wx.NewIdRef()
@@ -74,6 +77,8 @@ class MainFrame(wx.Frame):
         self._readonly = False
         self._dirty = False  # True if unsaved changes exist
         self._recent_menu: wx.Menu | None = None
+        # Clipboard for copy/paste: list of (path_components, entry) tuples
+        self._clipboard: list[tuple[list[str], DirectoryEntry | CPMFileInfo]] = []
 
         # Create UI components
         self._create_menu()
@@ -84,7 +89,7 @@ class MainFrame(wx.Frame):
         # Set up drag and drop
         self._drag_manager = DragDropManager(self._file_panel.file_list)
         self._drag_manager.set_export_callback(self._export_files_for_drag)
-        self._drag_manager.set_import_callback(self._import_dropped_files)
+        self._drag_manager.set_import_callback(self._import_dropped_files_at_pos)
         drop_target = self._drag_manager.create_drop_target()
         self._file_panel.file_list.SetDropTarget(drop_target)
 
@@ -126,6 +131,11 @@ class MainFrame(wx.Frame):
 
         # Edit menu
         edit_menu = wx.Menu()
+        edit_menu.Append(ID_COPY, "&Copy\tCtrl+C", "Copy selected files to clipboard")
+        edit_menu.Append(ID_PASTE, "&Paste\tCtrl+V", "Paste files from clipboard")
+        edit_menu.AppendSeparator()
+        edit_menu.Append(ID_SELECT_ALL, "Select &All\tCtrl+A", "Select all files")
+        edit_menu.AppendSeparator()
         edit_menu.Append(ID_COPY_FROM, "Copy &From Image...\tCtrl+Shift+C",
                         "Copy selected files to local disk")
         edit_menu.Append(ID_COPY_TO, "Copy &To Image...\tCtrl+Shift+V",
@@ -198,6 +208,9 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_close_image, id=ID_CLOSE)
         self.Bind(wx.EVT_MENU, self._on_close_image, id=ID_CLOSE_TB)  # Toolbar close button
         self.Bind(wx.EVT_MENU, self._on_exit, id=wx.ID_EXIT)
+        self.Bind(wx.EVT_MENU, self._on_copy, id=ID_COPY)
+        self.Bind(wx.EVT_MENU, self._on_paste, id=ID_PASTE)
+        self.Bind(wx.EVT_MENU, self._on_select_all, id=ID_SELECT_ALL)
         self.Bind(wx.EVT_MENU, self._on_copy_from, id=ID_COPY_FROM)
         self.Bind(wx.EVT_MENU, self._on_copy_to, id=ID_COPY_TO)
         self.Bind(wx.EVT_MENU, self._on_delete, id=ID_DELETE)
@@ -246,6 +259,9 @@ class MainFrame(wx.Frame):
         menubar.Enable(ID_SAVE, has_disk and self._dirty and not self._readonly)
         menubar.Enable(ID_SAVE_CLOSE, has_disk and not self._readonly)
         menubar.Enable(ID_CLOSE, has_disk)
+        menubar.Enable(ID_COPY, has_disk and has_selection)
+        menubar.Enable(ID_PASTE, has_disk and not self._readonly and len(self._clipboard) > 0)
+        menubar.Enable(ID_SELECT_ALL, has_disk)
         menubar.Enable(ID_COPY_FROM, has_disk and has_selection)
         menubar.Enable(ID_COPY_TO, has_disk and not self._readonly)
         menubar.Enable(ID_DELETE, has_disk and has_selection and not self._readonly)
@@ -401,8 +417,14 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 self._open_image(dlg.GetPath())
 
-    def _open_image(self, path: str, readonly: bool = False):
-        """Open a disk image file."""
+    def _open_image(self, path: str, readonly: bool = False, partition_idx: int | None = None):
+        """Open a disk image file.
+
+        Args:
+            path: Path to the disk image file
+            readonly: Whether to open in read-only mode
+            partition_idx: Optional partition index to open directly (for hard disks)
+        """
         # Close any currently open image (will prompt to save if dirty)
         if not self._check_save_before_close():
             return  # User cancelled
@@ -434,6 +456,14 @@ class MainFrame(wx.Frame):
 
                 if len(partitions) == 0:
                     raise V9KError("No partitions found on hard disk")
+                elif partition_idx is not None:
+                    # Partition specified via command line - validate it
+                    valid_indices = [p['index'] for p in partitions]
+                    if partition_idx in valid_indices:
+                        self._partition_idx = partition_idx
+                    else:
+                        raise V9KError(f"Invalid partition index {partition_idx}. "
+                                      f"Valid partitions: {valid_indices}")
                 elif len(partitions) == 1:
                     self._partition_idx = partitions[0]['index']
                 else:
@@ -698,28 +728,220 @@ class MainFrame(wx.Frame):
             self._on_refresh(None)
         elif keycode == wx.WXK_RETURN and event.AltDown():
             self._on_properties(None)
+        elif event.ControlDown():
+            if keycode == ord('C'):
+                self._on_copy(None)
+            elif keycode == ord('V'):
+                self._on_paste(None)
+            elif keycode == ord('A'):
+                self._on_select_all(None)
+            else:
+                event.Skip()
         else:
             event.Skip()
 
     def _on_context_menu(self, event):
         """Show context menu on right-click."""
+        # Ensure the right-clicked item is selected
+        item_idx = event.GetIndex()
+        if item_idx >= 0:
+            file_list = self._file_panel.file_list
+            # If clicking on an unselected item, select only that item
+            if not file_list.IsSelected(item_idx):
+                # Deselect all first
+                for i in range(file_list.GetItemCount()):
+                    file_list.Select(i, on=False)
+                # Select the clicked item
+                file_list.Select(item_idx, on=True)
+
         menu = wx.Menu()
 
+        menu.Append(ID_COPY, "Copy\tCtrl+C")
+        menu.Append(ID_PASTE, "Paste\tCtrl+V")
+        menu.AppendSeparator()
         menu.Append(ID_COPY_FROM, "Copy to Local...")
         menu.Append(ID_COPY_TO, "Copy from Local...")
         menu.AppendSeparator()
         menu.Append(ID_DELETE, "Delete")
         menu.AppendSeparator()
-        menu.Append(ID_PROPERTIES, "Properties")
+        menu.Append(ID_PROPERTIES, "Properties\tAlt+Enter")
 
         # Enable/disable based on state
         has_selection = len(self._file_panel.file_list.get_selected_entries()) > 0
+        menu.Enable(ID_COPY, has_selection)
+        menu.Enable(ID_PASTE, not self._readonly and len(self._clipboard) > 0)
         menu.Enable(ID_COPY_FROM, has_selection)
         menu.Enable(ID_DELETE, has_selection and not self._readonly)
         menu.Enable(ID_PROPERTIES, has_selection)
 
         self.PopupMenu(menu)
         menu.Destroy()
+
+    def _on_copy(self, event):
+        """Copy selected files/directories to clipboard."""
+        if not self._disk:
+            return
+
+        selected = self._file_panel.file_list.get_selected_entries()
+        if not selected:
+            return
+
+        # Build clipboard contents: (full_path_components, entry)
+        self._clipboard = []
+        for idx, entry in selected:
+            if entry is not None:
+                path = list(self._current_path)
+                path.append(entry.full_name)
+                self._clipboard.append((path, entry))
+
+        if self._clipboard:
+            count = len(self._clipboard)
+            dirs = sum(1 for _, e in self._clipboard
+                      if isinstance(e, DirectoryEntry) and e.is_directory)
+            files = count - dirs
+            parts = []
+            if files > 0:
+                parts.append(f"{files} file(s)")
+            if dirs > 0:
+                parts.append(f"{dirs} folder(s)")
+            self._statusbar.SetStatusText(f"Copied {', '.join(parts)} to clipboard", 0)
+            self._update_ui_state()
+
+    def _on_paste(self, event):
+        """Paste files/directories from clipboard to current directory."""
+        if not self._disk or self._readonly or not self._clipboard:
+            return
+
+        disk = self._get_current_disk()
+
+        # Check for existing files and collect overwrites
+        existing_files = []
+        for src_path, entry in self._clipboard:
+            dest_name = entry.full_name
+            # Check if file exists in current directory
+            try:
+                disk.find_entry(self._current_path + [dest_name])
+                existing_files.append(dest_name)
+            except Exception:
+                pass  # File doesn't exist, OK to copy
+
+        # Warn about overwrites (once for all files)
+        if existing_files:
+            if len(existing_files) == 1:
+                msg = f"'{existing_files[0]}' already exists. Overwrite?"
+            else:
+                msg = f"{len(existing_files)} file(s) already exist:\n\n"
+                msg += "\n".join(existing_files[:10])
+                if len(existing_files) > 10:
+                    msg += f"\n... and {len(existing_files) - 10} more"
+                msg += "\n\nOverwrite all?"
+
+            result = wx.MessageBox(
+                msg,
+                "Confirm Overwrite",
+                wx.YES_NO | wx.ICON_QUESTION,
+                self
+            )
+            if result != wx.YES:
+                return
+
+        # Perform the copy
+        errors = []
+        copied_files = 0
+        copied_dirs = 0
+
+        progress = ProgressDialog(
+            "Pasting Files",
+            "Preparing...",
+            len(self._clipboard),
+            self
+        )
+
+        try:
+            for i, (src_path, entry) in enumerate(self._clipboard):
+                dest_name = entry.full_name
+                if not progress.update(i, f"Pasting {dest_name}..."):
+                    break
+
+                try:
+                    if isinstance(entry, DirectoryEntry) and entry.is_directory:
+                        # Copy directory recursively
+                        dest_path = self._current_path + [dest_name]
+                        self._paste_directory(disk, src_path, dest_path)
+                        copied_dirs += 1
+                    else:
+                        # Copy file
+                        data = disk.read_file(src_path)
+                        dest_path = self._current_path + [dest_name]
+                        disk.write_file(dest_path, data)
+                        copied_files += 1
+                except V9KError as e:
+                    errors.append(f"{dest_name}: {e}")
+
+        finally:
+            progress.Destroy()
+
+        # Refresh and update state
+        self._refresh_file_list()
+        if copied_files > 0 or copied_dirs > 0:
+            self._mark_dirty()
+
+        # Show result
+        if errors:
+            parts = []
+            if copied_files > 0:
+                parts.append(f"{copied_files} file(s)")
+            if copied_dirs > 0:
+                parts.append(f"{copied_dirs} folder(s)")
+            msg = f"Pasted {', '.join(parts) if parts else '0 items'} with {len(errors)} error(s):\n\n"
+            msg += "\n".join(errors[:10])
+            if len(errors) > 10:
+                msg += f"\n... and {len(errors) - 10} more"
+            wx.MessageBox(msg, "Paste Complete", wx.OK | wx.ICON_WARNING, self)
+        else:
+            parts = []
+            if copied_files > 0:
+                parts.append(f"{copied_files} file(s)")
+            if copied_dirs > 0:
+                parts.append(f"{copied_dirs} folder(s)")
+            self._statusbar.SetStatusText(f"Pasted {', '.join(parts)}", 0)
+
+    def _paste_directory(self, disk, src_path: list[str], dest_path: list[str]):
+        """Recursively paste a directory."""
+        # Create destination directory
+        try:
+            disk.create_directory(dest_path)
+        except V9KError:
+            pass  # May already exist
+
+        # Copy contents
+        entries = disk.list_files(src_path)
+        for entry in entries:
+            if entry.is_dot_entry or entry.is_volume_label:
+                continue
+
+            src_entry_path = src_path + [entry.full_name]
+            dest_entry_path = dest_path + [entry.full_name]
+
+            if entry.is_directory:
+                self._paste_directory(disk, src_entry_path, dest_entry_path)
+            else:
+                data = disk.read_file(src_entry_path)
+                disk.write_file(dest_entry_path, data)
+
+    def _on_select_all(self, event):
+        """Select all files in the file list."""
+        if not self._disk:
+            return
+
+        file_list = self._file_panel.file_list
+        count = file_list.GetItemCount()
+
+        # Select all items
+        for i in range(count):
+            file_list.Select(i, on=True)
+
+        self._update_ui_state()
 
     def _on_begin_drag(self, event):
         """Handle beginning of drag operation."""
@@ -954,12 +1176,57 @@ class MainFrame(wx.Frame):
                 source_dir = dir_dlg.GetPath()
             self._copy_dir_to_image(source_dir)
 
-    def _copy_files_to_image(self, source_paths: list[str]):
-        """Copy local files to the disk image."""
+    def _copy_files_to_image(self, source_paths: list[str], target_path: list[str] | None = None):
+        """Copy local files to the disk image.
+
+        Args:
+            source_paths: List of local file paths to copy
+            target_path: Target directory path on disk (defaults to current path)
+        """
         if self._readonly:
             return
 
         disk = self._get_current_disk()
+
+        # Use current path if no target specified
+        if target_path is None:
+            target_path = list(self._current_path)
+
+        # Check for existing files and warn about overwrites
+        existing_files = []
+        for source_path in source_paths:
+            filename = os.path.basename(source_path)
+            try:
+                name, ext = validate_filename(filename)
+                dest_name = name.rstrip() + ('.' + ext.rstrip() if ext.rstrip() else '')
+            except Exception:
+                dest_name = filename.upper()[:12]
+
+            try:
+                disk.find_entry(target_path + [dest_name])
+                existing_files.append(dest_name)
+            except Exception:
+                pass  # File doesn't exist
+
+        if existing_files:
+            if len(existing_files) == 1:
+                msg = f"'{existing_files[0]}' already exists. Overwrite?"
+            else:
+                msg = f"{len(existing_files)} file(s) already exist:\n\n"
+                msg += "\n".join(existing_files[:10])
+                if len(existing_files) > 10:
+                    msg += f"\n... and {len(existing_files) - 10} more"
+                msg += "\n\nOverwrite all?"
+
+            result = wx.MessageBox(
+                msg,
+                "Confirm Overwrite",
+                wx.YES_NO | wx.ICON_QUESTION,
+                self
+            )
+            if result != wx.YES:
+                return
+
         errors = []
         copied = 0
 
@@ -990,7 +1257,7 @@ class MainFrame(wx.Frame):
                         data = f.read()
 
                     # Build destination path
-                    dest_path = list(self._current_path)
+                    dest_path = list(target_path)
                     dest_path.append(dest_name)
 
                     # Write to disk image
@@ -1022,12 +1289,21 @@ class MainFrame(wx.Frame):
         else:
             self._statusbar.SetStatusText(f"Copied {copied} file(s)", 0)
 
-    def _copy_dir_to_image(self, source_dir: str):
-        """Copy a local directory (recursively) to the disk image."""
+    def _copy_dir_to_image(self, source_dir: str, target_path: list[str] | None = None):
+        """Copy a local directory (recursively) to the disk image.
+
+        Args:
+            source_dir: Local directory path to copy
+            target_path: Target directory path on disk (defaults to current path)
+        """
         if self._readonly:
             return
 
         disk = self._get_current_disk()
+
+        # Use current path if no target specified
+        if target_path is None:
+            target_path = list(self._current_path)
 
         # Get the folder name and create it on the disk
         folder_name = os.path.basename(source_dir).upper()
@@ -1039,8 +1315,23 @@ class MainFrame(wx.Frame):
         except Exception:
             dos_name = folder_name[:8]  # Truncate to 8 chars
 
-        # Build destination path (in current directory)
-        dest_path = list(self._current_path) + [dos_name]
+        # Build destination path (in target directory)
+        dest_path = list(target_path) + [dos_name]
+
+        # Check if directory already exists and warn
+        try:
+            entry = disk.find_entry(target_path + [dos_name])
+            if entry:
+                result = wx.MessageBox(
+                    f"'{dos_name}' already exists. Files inside may be overwritten.\n\nContinue?",
+                    "Confirm Overwrite",
+                    wx.YES_NO | wx.ICON_QUESTION,
+                    self
+                )
+                if result != wx.YES:
+                    return
+        except Exception:
+            pass  # Directory doesn't exist, OK to create
 
         # Count total items for progress
         total_items = sum(1 for _ in self._count_items_recursive(source_dir))
@@ -1399,12 +1690,40 @@ class MainFrame(wx.Frame):
         ext = os.path.splitext(path)[1].lower()
         return ext in ('.img', '.ima', '.dsk')
 
-    def _import_dropped_files(self, local_paths: list[str]) -> bool:
+    def _import_dropped_files_at_pos(self, local_paths: list[str], x: int, y: int) -> bool:
+        """
+        Import dropped files, checking if drop was on a folder.
+
+        Args:
+            local_paths: List of local file paths
+            x: X coordinate of drop
+            y: Y coordinate of drop
+
+        Returns:
+            True if operation was successful
+        """
+        # Check if drop is on a folder
+        target_folder = None
+        file_list = self._file_panel.file_list
+
+        # HitTest to find item at drop position
+        item_idx, flags = file_list.HitTest((x, y))
+
+        if item_idx >= 0:
+            entry = file_list.get_entry_at(item_idx)
+            if entry is not None and isinstance(entry, DirectoryEntry) and entry.is_directory:
+                # Dropped onto a folder - use it as target
+                target_folder = entry.full_name
+
+        return self._import_dropped_files(local_paths, target_folder)
+
+    def _import_dropped_files(self, local_paths: list[str], target_folder: str | None = None) -> bool:
         """
         Import dropped files into the disk image, or open a dropped disk image.
 
         Args:
             local_paths: List of local file paths
+            target_folder: Optional folder name to import into (if dropped on a folder)
 
         Returns:
             True if operation was successful
@@ -1456,17 +1775,22 @@ class MainFrame(wx.Frame):
                 )
             return False
 
+        # Determine target path (current directory or target folder)
+        target_path = list(self._current_path)
+        if target_folder:
+            target_path.append(target_folder)
+
         # Separate files and directories
         files = [p for p in local_paths if os.path.isfile(p)]
         dirs = [p for p in local_paths if os.path.isdir(p)]
 
         # Copy files first
         if files:
-            self._copy_files_to_image(files)
+            self._copy_files_to_image(files, target_path)
 
         # Then copy directories
         for dir_path in dirs:
-            self._copy_dir_to_image(dir_path)
+            self._copy_dir_to_image(dir_path, target_path)
 
         return True
 
@@ -1502,11 +1826,12 @@ class MainFrame(wx.Frame):
             self._copy_files_to_image(local_paths)
         # else: Cancel - do nothing
 
-    def open_file(self, path: str):
+    def open_file(self, path: str, partition_idx: int | None = None):
         """
         Open a disk image file (public API for command-line argument).
 
         Args:
             path: Path to the disk image file
+            partition_idx: Optional partition index to open directly (for hard disks)
         """
-        self._open_image(path)
+        self._open_image(path, partition_idx=partition_idx)

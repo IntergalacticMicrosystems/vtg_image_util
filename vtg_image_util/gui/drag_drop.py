@@ -15,16 +15,18 @@ class FileDropTarget(wx.FileDropTarget):
     """
     Drop target that accepts files dragged from the OS file manager.
 
-    When files are dropped, calls the provided callback with the list of paths.
+    When files are dropped, calls the provided callback with the list of paths
+    and the drop position.
     """
 
-    def __init__(self, callback: Callable[[list[str]], bool]):
+    def __init__(self, callback: Callable[[list[str], int, int], bool]):
         """
         Initialize the drop target.
 
         Args:
-            callback: Function called with list of dropped file paths.
-                     Should return True if files were accepted.
+            callback: Function called with list of dropped file paths and
+                     x, y coordinates of the drop. Should return True if
+                     files were accepted.
         """
         super().__init__()
         self._callback = callback
@@ -32,7 +34,7 @@ class FileDropTarget(wx.FileDropTarget):
     def OnDropFiles(self, x: int, y: int, filenames: list[str]) -> bool:
         """Handle dropped files."""
         if self._callback:
-            return self._callback(filenames)
+            return self._callback(filenames, x, y)
         return False
 
 
@@ -60,13 +62,13 @@ class DragDropManager:
         """
         self._export_callback = callback
 
-    def set_import_callback(self, callback: Callable[[list[str]], bool]):
+    def set_import_callback(self, callback: Callable[[list[str], int, int], bool]):
         """
         Set the callback for importing files (drop in).
 
         Args:
             callback: Function that takes list of local file paths and
-                     returns True if import was successful.
+                     x, y drop coordinates. Returns True if import was successful.
         """
         self._import_callback = callback
 
@@ -116,13 +118,13 @@ class DragDropManager:
                 self._parent
             )
 
-    def _on_drop(self, filenames: list[str]) -> bool:
+    def _on_drop(self, filenames: list[str], x: int, y: int) -> bool:
         """Handle files dropped onto the control."""
         if not self._import_callback or not filenames:
             return False
 
         try:
-            return self._import_callback(filenames)
+            return self._import_callback(filenames, x, y)
         except Exception as e:
             wx.MessageBox(
                 f"Failed to import files: {e}",

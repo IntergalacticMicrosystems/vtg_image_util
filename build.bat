@@ -85,3 +85,4 @@ if exist "dist\%ZIPNAME%" (
 echo.
 echo Build complete!
 echo.
+pause
