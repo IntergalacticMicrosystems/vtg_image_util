@@ -886,8 +886,15 @@ Victor 9000 Disk Image Utility - Detailed Help
 
 OVERVIEW
 --------
-This utility manages Victor 9000 floppy and hard disk images. It supports
-reading, writing, and deleting files using FAT12 and CP/M filesystems.
+This utility manages Victor 9000 floppy and hard disk images. It also supports
+IBM PC floppy images. Features include reading, writing, and deleting files
+using FAT12 and CP/M filesystems.
+
+Supported disk types:
+    - Victor 9000 floppy disks (single and double-sided)
+    - Victor 9000 hard disk images (multi-partition)
+    - IBM PC floppy disks (360K, 720K, 1.2M, 1.44M)
+    - Victor 9000 CP/M-86 floppy disks (read-only)
 
 PATH SYNTAX
 -----------
@@ -910,47 +917,149 @@ and disk label structure.
 
 COMMANDS
 --------
+
+info <path>
+    Show disk image information including type, size, and free space.
+
+        vtg_image_util info disk.img              # Floppy info
+        vtg_image_util info hd.img                # Hard disk info (all partitions)
+        vtg_image_util info hd.img:0              # Hard disk partition 0 info
+
+    Options:
+        -v, --verbose   Show technical details (FAT size, cluster info, etc.)
+        --json          Output in JSON format
+
+verify <path>
+    Verify disk image integrity (check FAT, directory entries, etc.).
+
+        vtg_image_util verify disk.img            # Verify floppy
+        vtg_image_util verify hd.img              # Verify all hard disk partitions
+
+    Options:
+        --json          Output in JSON format
+
+create -t <type> [-l <label>] [-f] <output>
+    Create a new blank formatted disk image.
+
+        vtg_image_util create -t victor-ds newdisk.img       # Victor double-sided
+        vtg_image_util create -t victor-ss newdisk.img       # Victor single-sided
+        vtg_image_util create -t 1.44M -l MYDISK floppy.img  # IBM PC 1.44MB
+        vtg_image_util create -t 720K floppy.img             # IBM PC 720KB
+        vtg_image_util create -t 360K floppy.img -f          # Overwrite existing
+
+    Disk types:
+        victor-ss   Victor 9000 single-sided (~600KB)
+        victor-ds   Victor 9000 double-sided (~1.2MB)
+        360K        IBM PC 360KB (5.25" DD)
+        720K        IBM PC 720KB (3.5" DD)
+        1.2M        IBM PC 1.2MB (5.25" HD)
+        1.44M       IBM PC 1.44MB (3.5" HD)
+
+    Options:
+        -t, --type      Disk type (required)
+        -l, --label     Volume label (up to 11 characters)
+        -f, --force     Overwrite existing file
+        --json          Output in JSON format
+
 list <path> [-r]
     List directory contents or partitions.
 
     For floppy images:
-        vtg_image_util.py list disk.img              # List root directory
-        vtg_image_util.py list disk.img:\\SUBDIR     # List subdirectory
-        vtg_image_util.py list disk.img -r           # List all files recursively
+        vtg_image_util list disk.img              # List root directory
+        vtg_image_util list disk.img:\\SUBDIR     # List subdirectory
+        vtg_image_util list disk.img -r           # List all files recursively
 
     For hard disk images:
-        vtg_image_util.py list hd.img                # List partitions
-        vtg_image_util.py list hd.img:0:\\           # List partition 0 root
-        vtg_image_util.py list hd.img:1:\\DOS        # List DOS dir on partition 1
-        vtg_image_util.py list hd.img:0:\\ -r        # List partition 0 recursively
+        vtg_image_util list hd.img                # List partitions
+        vtg_image_util list hd.img:0:\\           # List partition 0 root
+        vtg_image_util list hd.img:1:\\DOS        # List DOS dir on partition 1
+        vtg_image_util list hd.img:0:\\ -r        # List partition 0 recursively
 
-copy <source> <dest>
+    Options:
+        -r, --recursive List subdirectories recursively
+        --json          Output in JSON format
+
+copy <source> <dest> [-r]
     Copy files between disk image and local filesystem.
 
     Copy FROM image (floppy):
-        vtg_image_util.py copy disk.img:\\FILE.COM .           # Single file
-        vtg_image_util.py copy disk.img:\\*.COM c:\\temp\\     # Wildcard
-        vtg_image_util.py copy disk.img:\\* c:\\temp\\ -r      # Recursive
+        vtg_image_util copy disk.img:\\FILE.COM .             # Single file
+        vtg_image_util copy disk.img:\\*.COM c:\\temp\\       # Wildcard
+        vtg_image_util copy disk.img:\\* c:\\temp\\ -r        # Recursive with subdirs
 
     Copy FROM image (hard disk):
-        vtg_image_util.py copy hd.img:0:\\FILE.COM .           # From partition 0
-        vtg_image_util.py copy hd.img:1:\\*.* c:\\temp\\       # Wildcard
+        vtg_image_util copy hd.img:0:\\FILE.COM .             # From partition 0
+        vtg_image_util copy hd.img:1:\\*.* c:\\temp\\         # Wildcard from partition 1
 
     Copy TO image:
-        vtg_image_util.py copy file.txt disk.img:\\FILE.TXT   # To floppy
-        vtg_image_util.py copy file.txt hd.img:0:\\FILE.TXT   # To partition 0
+        vtg_image_util copy file.txt disk.img:\\FILE.TXT     # To floppy
+        vtg_image_util copy file.txt hd.img:0:\\FILE.TXT     # To partition 0
+        vtg_image_util copy c:\\data\\*.txt disk.img:\\       # Multiple files
 
-delete <path>
-    Delete a file from the disk image.
+    Options:
+        -r, --recursive Copy subdirectories recursively
+        --json          Output in JSON format
 
-        vtg_image_util.py delete disk.img:\\FILE.COM          # From floppy
-        vtg_image_util.py delete hd.img:0:\\FILE.COM          # From partition 0
+delete <path> [-r]
+    Delete a file or directory from the disk image.
 
-OPTIONS
--------
---json          Output in JSON format for programmatic use
--r, --recursive Copy subdirectories recursively (copy command only)
---help-syntax   Show this detailed help page
+        vtg_image_util delete disk.img:\\FILE.COM            # Delete file
+        vtg_image_util delete hd.img:0:\\FILE.COM            # From partition 0
+        vtg_image_util delete disk.img:\\SUBDIR -r           # Delete dir recursively
+
+    Options:
+        -r, --recursive Delete directories and all contents
+        --json          Output in JSON format
+
+mkdir <path>
+    Create a directory on the disk image.
+
+        vtg_image_util mkdir disk.img:\\NEWDIR               # Create in root
+        vtg_image_util mkdir disk.img:\\PARENT\\CHILD        # Create nested
+        vtg_image_util mkdir hd.img:0:\\NEWDIR               # On partition 0
+
+    Options:
+        --json          Output in JSON format
+
+rmdir <path> [-r]
+    Remove a directory from the disk image.
+
+        vtg_image_util rmdir disk.img:\\EMPTYDIR             # Remove empty dir
+        vtg_image_util rmdir disk.img:\\FULLDIR -r           # Remove with contents
+        vtg_image_util rmdir hd.img:0:\\MYDIR -r             # From partition 0
+
+    Options:
+        -r, --recursive Remove directory and all contents
+        --json          Output in JSON format
+
+attr <path> [+/-RHSA]
+    View or modify file attributes.
+
+    View attributes:
+        vtg_image_util attr disk.img:\\FILE.COM              # Show attributes
+
+    Modify attributes:
+        vtg_image_util attr disk.img:\\FILE.COM -- +R        # Set read-only
+        vtg_image_util attr disk.img:\\FILE.COM -- -R +H     # Clear R, set H
+        vtg_image_util attr disk.img:\\FILE.COM -- +R +H +S  # Set multiple
+
+    Attributes:
+        R = Read-only       H = Hidden
+        S = System          A = Archive
+
+    Note: Use -- before attribute flags to prevent shell interpretation.
+
+    Options:
+        --json          Output in JSON format
+
+GLOBAL OPTIONS
+--------------
+    -h, --help      Show help message
+    --help-syntax   Show this detailed help page
+    --version       Show version number
+    -v, --verbose   Show detailed/technical output
+    -q, --quiet     Suppress non-essential output
+    --json          Output in JSON format (for scripting)
 
 WILDCARDS
 ---------
@@ -973,21 +1082,36 @@ Victor 9000 uses standard 8.3 DOS filenames:
     - Valid characters: A-Z, 0-9, ! # $ % & ' ( ) - @ ^ _ ` { } ~
     - Filenames are case-insensitive (stored uppercase)
 
+JSON OUTPUT
+-----------
+Use --json for machine-readable output. All commands support JSON mode.
+Errors are returned as: {"error": "message"}
+Success includes relevant data fields depending on the command.
+
+Example:
+    vtg_image_util list disk.img --json | jq '.files[].name'
+
 TECHNICAL NOTES
 ---------------
-FAT12 Floppy Disks:
+Victor 9000 FAT12 Floppy Disks:
     - 4 sectors per cluster (2048 bytes)
     - Single-sided: ~600KB, Double-sided: ~1.2MB
     - FAT at sectors 1-2 (SS) or 1-4 (DS)
     - Directory at sectors 3-10 (SS) or 5-12 (DS)
 
-CP/M-86 Floppy Disks:
+IBM PC FAT12 Floppy Disks:
+    - Variable sectors per cluster (1-2)
+    - Supports 360KB, 720KB, 1.2MB, 1.44MB formats
+    - Auto-detected via BIOS Parameter Block (BPB)
+    - Boot signature 0x55AA at offset 0x1FE
+
+Victor 9000 CP/M-86 Floppy Disks:
     - 1024-byte allocation blocks (2 sectors)
     - Directory at sector 94 (after system tracks)
     - No subdirectories supported
     - Files displayed with user number column
 
-Hard Disks:
+Victor 9000 Hard Disks:
     - Physical disk label at sector 0
     - Multiple partitions (virtual volumes)
     - Variable cluster size (typically 64 sectors = 32KB)
@@ -997,6 +1121,23 @@ EXIT CODES
 ----------
     0   Success
     1   Error (message printed to stderr or JSON output)
+
+EXAMPLES
+--------
+# Create a new Victor disk and add files
+vtg_image_util create -t victor-ds mydisk.img -l BACKUP
+vtg_image_util copy *.COM mydisk.img:\\
+vtg_image_util mkdir mydisk.img:\\DATA
+vtg_image_util copy data.txt mydisk.img:\\DATA\\DATA.TXT
+vtg_image_util list mydisk.img -r
+
+# Extract all files from a hard disk partition
+vtg_image_util list harddisk.img                          # See partitions
+vtg_image_util copy harddisk.img:0:\\* c:\\backup\\ -r     # Extract partition 0
+
+# Check disk integrity
+vtg_image_util verify mydisk.img
+vtg_image_util info mydisk.img -v
 """
 
 
