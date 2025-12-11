@@ -321,13 +321,12 @@ def copy_to_image(
     formatter: OutputFormatter,
     recursive: bool = False
 ) -> int:
-    """Copy file or directory from filesystem to disk image."""
-    try:
-        path_components = split_internal_path(internal_path)
-        if not path_components:
-            formatter.error("No destination specified in image path")
-            return 1
+    """Copy file or directory from filesystem to disk image.
 
+    If the destination path ends with \\ or is an existing directory,
+    the source filename will be appended automatically.
+    """
+    try:
         source = Path(source_path)
         if not source.exists():
             formatter.error(f"Source not found: {source_path}")
@@ -341,21 +340,59 @@ def copy_to_image(
                 return 1
             disk = V9KHardDiskImage(image_path, readonly=False)
             volume = disk.get_partition(partition)
-            dest_display = f"{image_path}:{partition}:\\{internal_path}"
         elif image_type == 'ibmpc':
             disk = IBMPCDiskImage(image_path, readonly=False)
             volume = disk
-            dest_display = f"{image_path}:\\{internal_path}"
         elif image_type == 'cpm':
             disk = V9KCPMDiskImage(image_path, readonly=False)
             volume = disk
-            dest_display = f"{image_path}:\\{internal_path}"
         else:
             disk = V9KDiskImage(image_path, readonly=False)
             volume = disk
-            dest_display = f"{image_path}:\\{internal_path}"
 
         try:
+            # Parse the destination path
+            path_components = split_internal_path(internal_path)
+
+            # Check if destination looks like a directory (ends with \ or /)
+            dest_is_dir = internal_path.endswith('\\') or internal_path.endswith('/')
+
+            # If not explicitly a directory path, check if it's an existing directory
+            if not dest_is_dir and path_components:
+                try:
+                    entry = volume.find_entry(path_components)
+                    if entry and entry.is_directory:
+                        dest_is_dir = True
+                except Exception:
+                    pass  # Not found or not a directory
+
+            # If destination is a directory, append source filename
+            if dest_is_dir:
+                # Get the source filename and convert to DOS 8.3 format
+                src_name = source.name.upper()
+                try:
+                    name, ext = validate_filename(src_name)
+                    dos_name = name.rstrip() + ('.' + ext.rstrip() if ext.rstrip() else '')
+                except Exception:
+                    # Fallback: truncate to 8.3
+                    if '.' in src_name:
+                        parts = src_name.rsplit('.', 1)
+                        dos_name = parts[0][:8] + '.' + parts[1][:3]
+                    else:
+                        dos_name = src_name[:8]
+                path_components.append(dos_name)
+
+            if not path_components:
+                formatter.error("No destination specified in image path")
+                return 1
+
+            # Build display path
+            final_internal_path = '\\'.join(path_components)
+            if image_type == 'harddisk':
+                dest_display = f"{image_path}:{partition}:\\{final_internal_path}"
+            else:
+                dest_display = f"{image_path}:\\{final_internal_path}"
+
             if source.is_dir():
                 if not recursive:
                     formatter.error(f"'{source_path}' is a directory. Use -r for recursive copy.")
