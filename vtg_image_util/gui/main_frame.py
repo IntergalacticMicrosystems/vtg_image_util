@@ -40,6 +40,8 @@ ID_CLOSE = wx.NewIdRef()
 ID_COPY = wx.NewIdRef()
 ID_PASTE = wx.NewIdRef()
 ID_SELECT_ALL = wx.NewIdRef()
+ID_NEW_FOLDER = wx.NewIdRef()
+ID_RENAME = wx.NewIdRef()
 ID_PROPERTIES = wx.NewIdRef()
 ID_PREFERENCES = wx.NewIdRef()
 ID_RECENT_CLEAR = wx.NewIdRef()
@@ -142,6 +144,9 @@ class MainFrame(wx.Frame):
                         "Copy local files to disk image")
         edit_menu.AppendSeparator()
         edit_menu.Append(ID_DELETE, "&Delete\tDelete", "Delete selected files")
+        edit_menu.Append(ID_RENAME, "Re&name\tF2", "Rename selected file")
+        edit_menu.AppendSeparator()
+        edit_menu.Append(ID_NEW_FOLDER, "New &Folder\tCtrl+Shift+N", "Create a new folder")
         edit_menu.AppendSeparator()
         edit_menu.Append(ID_PROPERTIES, "P&roperties\tAlt+Enter",
                         "Show file properties")
@@ -214,6 +219,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_copy_from, id=ID_COPY_FROM)
         self.Bind(wx.EVT_MENU, self._on_copy_to, id=ID_COPY_TO)
         self.Bind(wx.EVT_MENU, self._on_delete, id=ID_DELETE)
+        self.Bind(wx.EVT_MENU, self._on_rename, id=ID_RENAME)
+        self.Bind(wx.EVT_MENU, self._on_new_folder, id=ID_NEW_FOLDER)
         self.Bind(wx.EVT_MENU, self._on_properties, id=ID_PROPERTIES)
         self.Bind(wx.EVT_MENU, self._on_preferences, id=ID_PREFERENCES)
         self.Bind(wx.EVT_MENU, self._on_refresh, id=ID_REFRESH)
@@ -265,6 +272,8 @@ class MainFrame(wx.Frame):
         menubar.Enable(ID_COPY_FROM, has_disk and has_selection)
         menubar.Enable(ID_COPY_TO, has_disk and not self._readonly)
         menubar.Enable(ID_DELETE, has_disk and has_selection and not self._readonly)
+        menubar.Enable(ID_RENAME, has_disk and len(selected) == 1 and not self._readonly)
+        menubar.Enable(ID_NEW_FOLDER, has_disk and not self._readonly and self._image_type != 'cpm')
         menubar.Enable(ID_PROPERTIES, has_disk and has_selection)
         menubar.Enable(ID_REFRESH, has_disk)
         menubar.Enable(ID_UP, has_disk and len(self._current_path) > 0)
@@ -724,6 +733,8 @@ class MainFrame(wx.Frame):
             self._on_up(None)
         elif keycode == wx.WXK_DELETE:
             self._on_delete(None)
+        elif keycode == wx.WXK_F2:
+            self._on_rename(None)
         elif keycode == wx.WXK_F5:
             self._on_refresh(None)
         elif keycode == wx.WXK_RETURN and event.AltDown():
@@ -762,16 +773,22 @@ class MainFrame(wx.Frame):
         menu.Append(ID_COPY_FROM, "Copy to Local...")
         menu.Append(ID_COPY_TO, "Copy from Local...")
         menu.AppendSeparator()
+        menu.Append(ID_RENAME, "Rename\tF2")
         menu.Append(ID_DELETE, "Delete")
+        menu.AppendSeparator()
+        menu.Append(ID_NEW_FOLDER, "New Folder\tCtrl+Shift+N")
         menu.AppendSeparator()
         menu.Append(ID_PROPERTIES, "Properties\tAlt+Enter")
 
         # Enable/disable based on state
-        has_selection = len(self._file_panel.file_list.get_selected_entries()) > 0
+        selected = self._file_panel.file_list.get_selected_entries()
+        has_selection = len(selected) > 0
         menu.Enable(ID_COPY, has_selection)
         menu.Enable(ID_PASTE, not self._readonly and len(self._clipboard) > 0)
         menu.Enable(ID_COPY_FROM, has_selection)
+        menu.Enable(ID_RENAME, len(selected) == 1 and not self._readonly)
         menu.Enable(ID_DELETE, has_selection and not self._readonly)
+        menu.Enable(ID_NEW_FOLDER, not self._readonly and self._image_type != 'cpm')
         menu.Enable(ID_PROPERTIES, has_selection)
 
         self.PopupMenu(menu)
@@ -1565,6 +1582,152 @@ class MainFrame(wx.Frame):
             if deleted_dirs > 0:
                 parts.append(f"{deleted_dirs} folder(s)")
             self._statusbar.SetStatusText(f"Deleted {', '.join(parts)}", 0)
+
+    def _on_new_folder(self, event):
+        """Create a new folder in the current directory."""
+        if self._readonly or not self._disk:
+            return
+
+        # CP/M doesn't support directories
+        if self._image_type == 'cpm':
+            wx.MessageBox(
+                "CP/M disk images do not support folders.",
+                "Cannot Create Folder",
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
+            return
+
+        # Show dialog to get folder name
+        dlg = wx.TextEntryDialog(
+            self,
+            "Enter folder name (8 characters max, letters/numbers only):",
+            "New Folder",
+            ""
+        )
+
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return
+
+        folder_name = dlg.GetValue().strip().upper()
+        dlg.Destroy()
+
+        if not folder_name:
+            return
+
+        # Validate folder name
+        try:
+            name, ext = validate_filename(folder_name)
+            # Folders shouldn't have extensions typically
+            if ext.strip():
+                wx.MessageBox(
+                    "Folder names should not have extensions.",
+                    "Invalid Name",
+                    wx.OK | wx.ICON_WARNING,
+                    self
+                )
+                return
+        except Exception as e:
+            wx.MessageBox(
+                f"Invalid folder name: {e}",
+                "Invalid Name",
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
+            return
+
+        # Create the folder
+        try:
+            disk = self._get_current_disk()
+            path = list(self._current_path)
+            path.append(name.rstrip())
+            disk.create_directory(path)
+
+            self._refresh_file_list()
+            self._mark_dirty()
+            self._statusbar.SetStatusText(f"Created folder '{name.rstrip()}'", 0)
+
+        except V9KError as e:
+            wx.MessageBox(
+                f"Failed to create folder: {e}",
+                "Error",
+                wx.OK | wx.ICON_ERROR,
+                self
+            )
+
+    def _on_rename(self, event):
+        """Rename the selected file or folder."""
+        if self._readonly or not self._disk:
+            return
+
+        selected = self._file_panel.file_list.get_selected_entries()
+        if len(selected) != 1:
+            return
+
+        idx, entry = selected[0]
+        if entry is None:
+            return
+
+        # CP/M - check if disk supports rename
+        if self._image_type == 'cpm':
+            wx.MessageBox(
+                "Rename is not supported for CP/M disk images.",
+                "Cannot Rename",
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
+            return
+
+        # Show dialog with current name
+        current_name = entry.full_name
+        dlg = wx.TextEntryDialog(
+            self,
+            f"Rename '{current_name}' to:",
+            "Rename",
+            current_name
+        )
+
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return
+
+        new_name = dlg.GetValue().strip().upper()
+        dlg.Destroy()
+
+        if not new_name or new_name == current_name:
+            return
+
+        # Validate new name
+        try:
+            validate_filename(new_name)
+        except Exception as e:
+            wx.MessageBox(
+                f"Invalid filename: {e}",
+                "Invalid Name",
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
+            return
+
+        # Perform rename
+        try:
+            disk = self._get_current_disk()
+            path = list(self._current_path)
+            path.append(current_name)
+            disk.rename_entry(path, new_name)
+
+            self._refresh_file_list()
+            self._mark_dirty()
+            self._statusbar.SetStatusText(f"Renamed '{current_name}' to '{new_name}'", 0)
+
+        except V9KError as e:
+            wx.MessageBox(
+                f"Failed to rename: {e}",
+                "Error",
+                wx.OK | wx.ICON_ERROR,
+                self
+            )
 
     def _on_properties(self, event):
         """Show properties for selected file."""

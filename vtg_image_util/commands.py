@@ -355,7 +355,12 @@ def copy_to_image(
             path_components = split_internal_path(internal_path)
 
             # Check if destination looks like a directory (ends with \ or /)
-            dest_is_dir = internal_path.endswith('\\') or internal_path.endswith('/')
+            # Also treat empty/None internal_path as root directory (e.g., img:1:\)
+            dest_is_dir = (
+                not internal_path or
+                internal_path.endswith('\\') or
+                internal_path.endswith('/')
+            )
 
             # If not explicitly a directory path, check if it's an existing directory
             if not dest_is_dir and path_components:

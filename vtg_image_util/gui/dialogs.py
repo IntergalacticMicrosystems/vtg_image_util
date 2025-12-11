@@ -86,7 +86,6 @@ class PropertiesDialog(wx.Dialog):
 
     def _create_ui(self, entry: DirectoryEntry | CPMFileInfo, path: str):
         """Create the dialog UI."""
-        panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Create a grid for properties
@@ -94,12 +93,12 @@ class PropertiesDialog(wx.Dialog):
         grid.AddGrowableCol(1)
 
         # Name
-        grid.Add(wx.StaticText(panel, label="Name:"))
-        grid.Add(wx.StaticText(panel, label=entry.full_name))
+        grid.Add(wx.StaticText(self, label="Name:"))
+        grid.Add(wx.StaticText(self, label=entry.full_name))
 
         # Path
-        grid.Add(wx.StaticText(panel, label="Path:"))
-        grid.Add(wx.StaticText(panel, label=path))
+        grid.Add(wx.StaticText(self, label="Path:"))
+        grid.Add(wx.StaticText(self, label=path))
 
         # Size
         if isinstance(entry, DirectoryEntry) and entry.is_directory:
@@ -112,13 +111,13 @@ class PropertiesDialog(wx.Dialog):
                 size_text = f"{size:,} bytes ({size / 1024:.1f} KB)"
             else:
                 size_text = f"{size:,} bytes ({size / (1024 * 1024):.1f} MB)"
-        grid.Add(wx.StaticText(panel, label="Size:"))
-        grid.Add(wx.StaticText(panel, label=size_text))
+        grid.Add(wx.StaticText(self, label="Size:"))
+        grid.Add(wx.StaticText(self, label=size_text))
 
         # Attributes
-        grid.Add(wx.StaticText(panel, label="Attributes:"))
+        grid.Add(wx.StaticText(self, label="Attributes:"))
         attr_text = self._format_attributes(entry)
-        grid.Add(wx.StaticText(panel, label=attr_text))
+        grid.Add(wx.StaticText(self, label=attr_text))
 
         # Date/time (FAT only)
         if isinstance(entry, DirectoryEntry):
@@ -134,20 +133,20 @@ class PropertiesDialog(wx.Dialog):
                 date_text = f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}"
             else:
                 date_text = "Not set"
-            grid.Add(wx.StaticText(panel, label="Modified:"))
-            grid.Add(wx.StaticText(panel, label=date_text))
+            grid.Add(wx.StaticText(self, label="Modified:"))
+            grid.Add(wx.StaticText(self, label=date_text))
 
             # First cluster
-            grid.Add(wx.StaticText(panel, label="First cluster:"))
-            grid.Add(wx.StaticText(panel, label=str(entry.first_cluster)))
+            grid.Add(wx.StaticText(self, label="First cluster:"))
+            grid.Add(wx.StaticText(self, label=str(entry.first_cluster)))
 
         # CP/M specific
         if isinstance(entry, CPMFileInfo):
-            grid.Add(wx.StaticText(panel, label="User:"))
-            grid.Add(wx.StaticText(panel, label=str(entry.user)))
+            grid.Add(wx.StaticText(self, label="User:"))
+            grid.Add(wx.StaticText(self, label=str(entry.user)))
 
-            grid.Add(wx.StaticText(panel, label="Extents:"))
-            grid.Add(wx.StaticText(panel, label=str(len(entry.extents))))
+            grid.Add(wx.StaticText(self, label="Extents:"))
+            grid.Add(wx.StaticText(self, label=str(len(entry.extents))))
 
         sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 10)
 
@@ -155,12 +154,7 @@ class PropertiesDialog(wx.Dialog):
         btn_sizer = self.CreateButtonSizer(wx.OK)
         sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 10)
 
-        panel.SetSizer(sizer)
-
-        # Size to fit panel
-        main_sizer = wx.BoxSizer(wx.VERTICAL)
-        main_sizer.Add(panel, 1, wx.EXPAND)
-        self.SetSizer(main_sizer)
+        self.SetSizer(sizer)
 
     def _format_attributes(self, entry: DirectoryEntry | CPMFileInfo) -> str:
         """Format attributes as human-readable string."""
@@ -288,11 +282,10 @@ class AboutDialog(wx.Dialog):
 
     def _create_ui(self):
         """Create the dialog UI."""
-        panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Title
-        title = wx.StaticText(panel, label="Vtg Disk Image Utility")
+        title = wx.StaticText(self, label="Vtg Disk Image Utility")
         title_font = title.GetFont()
         title_font.SetPointSize(14)
         title_font.SetWeight(wx.FONTWEIGHT_BOLD)
@@ -300,12 +293,12 @@ class AboutDialog(wx.Dialog):
         sizer.Add(title, 0, wx.ALIGN_CENTER | wx.ALL, 10)
 
         # Version
-        version = wx.StaticText(panel, label="Version 1.0.0")
+        version = wx.StaticText(self, label="Version 1.0.0")
         sizer.Add(version, 0, wx.ALIGN_CENTER | wx.BOTTOM, 10)
 
         # Description
         desc = wx.StaticText(
-            panel,
+            self,
             label="A cross-platform utility for reading and writing\n"
                   "Victor 9000 and IBM PC floppy and hard disk images.",
             style=wx.ALIGN_CENTER
@@ -314,7 +307,7 @@ class AboutDialog(wx.Dialog):
 
         # Supported formats
         formats = wx.StaticText(
-            panel,
+            self,
             label="\nSupported formats:\n"
                   "- Victor 9000 FAT12 floppy disks\n"
                   "- Victor 9000 hard disks (multiple partitions)\n"
@@ -328,9 +321,4 @@ class AboutDialog(wx.Dialog):
         btn_sizer = self.CreateButtonSizer(wx.OK)
         sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 10)
 
-        panel.SetSizer(sizer)
-
-        # Main sizer
-        main_sizer = wx.BoxSizer(wx.VERTICAL)
-        main_sizer.Add(panel, 1, wx.EXPAND)
-        self.SetSizer(main_sizer)
+        self.SetSizer(sizer)

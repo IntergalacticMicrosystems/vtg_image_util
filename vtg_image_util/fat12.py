@@ -777,6 +777,87 @@ class FAT12Base(ABC):
                             return
             raise FileNotFoundError(f"File not found: {name.strip()}.{ext.strip()}")
 
+    def rename_entry(self, path_components: list[str], new_name: str) -> None:
+        """
+        Rename a file or directory.
+
+        Args:
+            path_components: Path to the file/directory to rename
+            new_name: New filename (8.3 format, e.g., "NEWNAME.TXT")
+        """
+        if not path_components:
+            raise InvalidFilenameError("Empty path")
+
+        # Parse old and new names
+        dir_path = path_components[:-1]
+        old_filename = path_components[-1]
+
+        old_name, old_ext = validate_filename(old_filename)
+        new_name_part, new_ext = validate_filename(new_name)
+
+        # Find target directory
+        if dir_path:
+            dir_cluster, _ = self.resolve_path(dir_path)
+        else:
+            dir_cluster = None
+
+        # Check that the new name doesn't already exist (unless it's the same)
+        if old_name != new_name_part or old_ext != new_ext:
+            entries = self.read_directory(dir_cluster)
+            for entry in entries:
+                if entry.name == new_name_part and entry.extension == new_ext:
+                    raise DiskError(f"File already exists: {new_name}")
+
+        # Find and update the entry
+        self._rename_entry_in_dir(dir_cluster, old_name, old_ext, new_name_part, new_ext)
+
+    def _rename_entry_in_dir(
+        self,
+        dir_cluster: int | None,
+        old_name: str,
+        old_ext: str,
+        new_name: str,
+        new_ext: str
+    ) -> None:
+        """Update name/extension in a directory entry."""
+        new_name_bytes = new_name.encode('latin-1')
+        new_ext_bytes = new_ext.encode('latin-1')
+
+        if dir_cluster is None:
+            # Root directory
+            for i in range(self.dir_sectors):
+                sector_data = bytearray(self.read_sector(self.dir_start + i))
+                for j in range(SECTOR_SIZE // DIR_ENTRY_SIZE):
+                    offset = j * DIR_ENTRY_SIZE
+                    entry_name = sector_data[offset:offset + 8].decode('latin-1')
+                    entry_ext = sector_data[offset + 8:offset + 11].decode('latin-1')
+                    if entry_name == old_name and entry_ext == old_ext:
+                        # Update name and extension
+                        sector_data[offset:offset + 8] = new_name_bytes
+                        sector_data[offset + 8:offset + 11] = new_ext_bytes
+                        self.write_sector(self.dir_start + i, bytes(sector_data))
+                        return
+            raise FileNotFoundError(f"File not found: {old_name.strip()}.{old_ext.strip()}")
+        else:
+            # Subdirectory
+            clusters = self.follow_chain(dir_cluster)
+            for cluster in clusters:
+                first_sector = self._cluster_to_sector(cluster)
+                for sec_offset in range(self.sectors_per_cluster):
+                    sector = first_sector + sec_offset
+                    sector_data = bytearray(self.read_sector(sector))
+                    for j in range(SECTOR_SIZE // DIR_ENTRY_SIZE):
+                        offset = j * DIR_ENTRY_SIZE
+                        entry_name = sector_data[offset:offset + 8].decode('latin-1')
+                        entry_ext = sector_data[offset + 8:offset + 11].decode('latin-1')
+                        if entry_name == old_name and entry_ext == old_ext:
+                            # Update name and extension
+                            sector_data[offset:offset + 8] = new_name_bytes
+                            sector_data[offset + 8:offset + 11] = new_ext_bytes
+                            self.write_sector(sector, bytes(sector_data))
+                            return
+            raise FileNotFoundError(f"File not found: {old_name.strip()}.{old_ext.strip()}")
+
     def flush(self) -> None:
         """Flush any pending FAT changes to disk."""
         if self._fat_dirty:
