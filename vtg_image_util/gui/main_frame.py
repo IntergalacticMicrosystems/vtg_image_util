@@ -5,6 +5,7 @@ Provides the primary UI including menu, toolbar, file list, and status bar.
 """
 
 import os
+import re
 import shutil
 import tempfile
 from typing import Any
@@ -14,6 +15,7 @@ import wx
 from ..floppy import V9KDiskImage, IBMPCDiskImage
 from ..harddisk import V9KHardDiskImage, V9KPartition
 from ..cpm import V9KCPMDiskImage, CPMFileInfo
+from ..chd import CHDError, is_chd_file
 from ..info import get_disk_info
 from ..models import DirectoryEntry
 from ..utils import detect_image_type, validate_filename
@@ -414,7 +416,8 @@ class MainFrame(wx.Frame):
     def _on_open(self, event):
         """Handle Open menu/toolbar action."""
         wildcard = (
-            "Disk images (*.img;*.ima;*.dsk)|*.img;*.ima;*.dsk|"
+            "Disk images (*.img;*.ima;*.dsk;*.chd)|*.img;*.ima;*.dsk;*.chd|"
+            "CHD images (*.chd)|*.chd|"
             "All files (*.*)|*.*"
         )
         with wx.FileDialog(
@@ -443,8 +446,13 @@ class MainFrame(wx.Frame):
         try:
             self._image_path = path
             self._image_type = detect_image_type(path)
-            self._readonly = readonly
             self._dirty = False
+
+            # CHD files are always read-only (compressed container format)
+            if is_chd_file(path):
+                readonly = True
+
+            self._readonly = readonly
 
             # Create temp copy to work with (unless readonly)
             if readonly:
@@ -502,6 +510,41 @@ class MainFrame(wx.Frame):
             self._prefs.add_recent_file(path)
             self._update_recent_menu()
 
+        except CHDError as e:
+            # Show a specific warning for unsupported CHD files
+            error_msg = str(e)
+            filename = os.path.basename(path)
+
+            # Parse the error to extract codec info and build a cleaner message
+            if "unsupported codec" in error_msg.lower():
+                # Extract codec names from the error
+                codec_match = re.search(r'codec\(s\): ([^.]+)', error_msg)
+                codecs = codec_match.group(1) if codec_match else "unknown"
+
+                msg = (
+                    f"This CHD file uses compression formats that are not supported:\n\n"
+                    f"    {codecs}\n\n"
+                    f"To convert to a raw image, use MAME's chdman tool:\n\n"
+                    f"    chdman extractraw -i \"{filename}\" -o output.img"
+                )
+            elif "parent" in error_msg.lower():
+                msg = (
+                    f"This CHD file requires a parent file (delta CHD).\n\n"
+                    f"To convert to a standalone image, use MAME's chdman tool:\n\n"
+                    f"    chdman extractraw -i \"{filename}\" -o output.img"
+                )
+            else:
+                msg = f"{error_msg}"
+
+            dlg = wx.MessageDialog(
+                self,
+                msg,
+                "Unsupported CHD Format",
+                wx.OK | wx.ICON_WARNING
+            )
+            dlg.ShowModal()
+            dlg.Destroy()
+            self._close_current_image()
         except V9KError as e:
             wx.MessageBox(str(e), "Error Opening Image", wx.OK | wx.ICON_ERROR, self)
             self._close_current_image()
@@ -1851,7 +1894,7 @@ class MainFrame(wx.Frame):
             True if the file has a recognized disk image extension
         """
         ext = os.path.splitext(path)[1].lower()
-        return ext in ('.img', '.ima', '.dsk')
+        return ext in ('.img', '.ima', '.dsk', '.chd')
 
     def _import_dropped_files_at_pos(self, local_paths: list[str], x: int, y: int) -> bool:
         """

@@ -8,6 +8,43 @@ import sys
 from .models import DirectoryEntry
 
 
+def _format_device_unit(device_unit: int) -> str:
+    """Format a device_unit value as a readable drive identifier.
+
+    Victor 9000 device_unit encoding:
+    - High byte 0xFF = floppy drive (0xFF00=A:, 0xFF01=B:)
+    - High byte 0x00 = hard disk unit (0x0000=unit 0, 0x0001=unit 1, etc.)
+    """
+    high_byte = (device_unit >> 8) & 0xFF
+    low_byte = device_unit & 0xFF
+
+    if high_byte == 0xFF:
+        # Floppy drive
+        if low_byte < 26:
+            return f"Floppy {chr(ord('A') + low_byte)}:"
+        return f"Floppy unit {low_byte}"
+    elif high_byte == 0x00:
+        # Hard disk unit
+        return f"HD unit {low_byte}"
+    else:
+        # Unknown format, show raw value
+        return f"Device 0x{device_unit:04X}"
+
+
+def _format_volume_index(volume_index: int) -> str:
+    """Format a volume_index as a drive letter.
+
+    Victor 9000 hard disk volumes map to drive letters:
+    - Volume 0 = C:
+    - Volume 1 = D:
+    - Volume 2 = E:
+    etc.
+    """
+    if volume_index < 24:  # C: through Z:
+        return f"{chr(ord('C') + volume_index)}:"
+    return f"Volume {volume_index}"
+
+
 class OutputFormatter:
     """Handle output formatting (text or JSON)."""
 
@@ -87,6 +124,26 @@ class OutputFormatter:
                 capacity_mb = p['capacity_bytes'] / (1024 * 1024)
                 name = p['name'] if p['name'] else f"Volume {p['index']}"
                 print(f"  {p['index']}: {name:<16} {capacity_mb:>8.1f} MB")
+                # Display configuration information (drive assignments)
+                # The position in the list determines the drive letter assignment
+                assignments = p.get('assignments', [])
+                if assignments:
+                    hd_drive_idx = 0  # Counter for HD drive letters (C:, D:, E:, ...)
+                    for a in assignments:
+                        device_unit = a['device_unit']
+                        vol_idx = a['volume_index']
+                        high_byte = (device_unit >> 8) & 0xFF
+
+                        if high_byte == 0xFF:
+                            # Floppy drive assignment
+                            low_byte = device_unit & 0xFF
+                            drive_letter = chr(ord('A') + low_byte) if low_byte < 26 else f"Floppy{low_byte}"
+                            print(f"       {drive_letter}: -> Volume {vol_idx}")
+                        else:
+                            # Hard disk drive assignment - sequential C:, D:, E:, ...
+                            drive_letter = chr(ord('C') + hd_drive_idx)
+                            print(f"       {drive_letter}: -> Volume {vol_idx}")
+                            hd_drive_idx += 1
             print()
             print(f"  {len(partitions)} partition(s)")
 

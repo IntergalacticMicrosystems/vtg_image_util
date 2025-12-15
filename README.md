@@ -1,6 +1,3 @@
-# NOTE: Much of this is untested ~ USE AT YOUR OWN RISK!
-# Completely untested on Linux or MacOS at this point
-
 # Vtg Disk Image Utility
 
 A cross-platform utility for reading and writing Victor 9000 and IBM PC floppy and hard disk images.

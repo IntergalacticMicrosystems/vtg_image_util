@@ -73,11 +73,12 @@ def parse_image_path(path_spec: str) -> tuple[str | None, int | None, str | None
         'hd.img:1:\\DIR\\F.TXT' -> ('hd.img', 1, 'DIR\\F.TXT')
         'hd.img:0:' -> ('hd.img', 0, None)
         'hd.img' -> ('hd.img', None, None)
+        'disk.chd:0:\\FILE.COM' -> ('disk.chd', 0, 'FILE.COM')
     """
     lower = path_spec.lower()
 
-    # Find image file extensions
-    for ext in ['.img', '.ima', '.dsk']:
+    # Find image file extensions (including CHD container format)
+    for ext in ['.img', '.ima', '.dsk', '.chd']:
         idx = lower.find(ext)
         if idx != -1:
             split_pos = idx + len(ext)
@@ -140,7 +141,17 @@ def detect_image_type(image_path: str) -> str:
     """
     Detect if image is 'floppy', 'harddisk', 'ibmpc', or 'cpm'.
     Uses file size and structure heuristics.
+    CHD files are treated as hard disk images.
     """
+    # Check for CHD format first (by signature)
+    try:
+        with open(image_path, 'rb') as f:
+            sig = f.read(8)
+            if sig == b'MComprHD':
+                return 'harddisk'  # CHD is handled by V9KHardDiskImage
+    except OSError:
+        pass
+
     try:
         file_size = os.path.getsize(image_path)
     except OSError:

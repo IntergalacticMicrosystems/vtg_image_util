@@ -57,6 +57,8 @@ VVL_DATA_START = 34
 VVL_HOST_BLOCK_SIZE = 38
 VVL_ALLOCATION_UNIT = 40
 VVL_NUM_DIR_ENTRIES = 42
+VVL_RESERVED = 44          # 16 bytes reserved
+VVL_ASSIGNMENT_COUNT = 60  # Configuration information starts here
 
 # CP/M filesystem constants
 CPM_DIR_ENTRY_SIZE = 32

@@ -25,6 +25,7 @@ from .constants import (
     PDL_SECTOR_SIZE,
     PDL_SERIAL_NUMBER,
     VVL_ALLOCATION_UNIT,
+    VVL_ASSIGNMENT_COUNT,
     VVL_DATA_START,
     VVL_HOST_BLOCK_SIZE,
     VVL_IPL_DISK_ADDR,
@@ -341,7 +342,7 @@ class PhysicalDiskLabel:
         for _ in range(volume_count):
             addr = struct.unpack_from('<I', data, offset)[0]
             virtual_volume_addresses.append(addr)
-            offset += 4
+            offset += 4      
 
         return cls(
             label_type=label_type,
@@ -359,6 +360,13 @@ class PhysicalDiskLabel:
 
 
 @dataclass
+class DriveAssignment:
+    """Drive assignment mapping from Configuration Information."""
+    device_unit: int    # Physical unit number
+    volume_index: int   # Index into virtual volume list
+
+
+@dataclass
 class VirtualVolumeLabel:
     """Virtual volume label for a partition."""
     label_type: int
@@ -373,6 +381,7 @@ class VirtualVolumeLabel:
     allocation_unit: int  # sectors per cluster
     num_dir_entries: int
     volume_start_sector: int  # absolute sector address of this label
+    assignments: list[DriveAssignment]  # Configuration information
 
     @classmethod
     def from_bytes(cls, data: bytes, volume_start_sector: int) -> 'VirtualVolumeLabel':
@@ -392,6 +401,19 @@ class VirtualVolumeLabel:
         allocation_unit = struct.unpack_from('<H', data, VVL_ALLOCATION_UNIT)[0]
         num_dir_entries = struct.unpack_from('<H', data, VVL_NUM_DIR_ENTRIES)[0]
 
+        # Parse Configuration Information (after 16-byte reserved field)
+        # Limit to reasonable max to avoid garbage data (max 16 assignments)
+        assignments = []
+        if len(data) > VVL_ASSIGNMENT_COUNT:
+            assignment_count = min(data[VVL_ASSIGNMENT_COUNT], 16)
+            offset = VVL_ASSIGNMENT_COUNT + 1
+            for _ in range(assignment_count):
+                if offset + 4 <= len(data):
+                    device_unit = struct.unpack_from('<H', data, offset)[0]
+                    volume_index = struct.unpack_from('<H', data, offset + 2)[0]
+                    assignments.append(DriveAssignment(device_unit, volume_index))
+                    offset += 4
+
         return cls(
             label_type=label_type,
             volume_name=volume_name,
@@ -404,7 +426,8 @@ class VirtualVolumeLabel:
             host_block_size=host_block_size,
             allocation_unit=allocation_unit,
             num_dir_entries=num_dir_entries,
-            volume_start_sector=volume_start_sector
+            volume_start_sector=volume_start_sector,
+            assignments=assignments
         )
 
 
