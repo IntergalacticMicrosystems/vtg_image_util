@@ -70,6 +70,21 @@ class V9KPartition(FAT12Base):
         volume_data_sectors = volume_label.volume_capacity - (1 + 2 * self._fat_sectors + self._dir_sectors)
         self._total_clusters = volume_data_sectors // self._sectors_per_cluster
 
+        # CRITICAL: Check for IPL (boot code) area that must not be overwritten
+        # The IPL address is relative to volume start, and resides at the end of
+        # the partition's data area. We must limit cluster allocation to avoid it.
+        if volume_label.ipl_disk_address > 0 and volume_label.ipl_load_length > 0:
+            # IPL start sector (relative to volume start)
+            ipl_start_relative = volume_label.ipl_disk_address
+            # Calculate the maximum usable data sectors (before IPL starts)
+            # data_start is at offset (1 + 2*fat_sectors + dir_sectors) from volume start
+            metadata_sectors = 1 + 2 * self._fat_sectors + self._dir_sectors
+            usable_data_sectors = ipl_start_relative - metadata_sectors
+            # Limit total clusters to fit within usable area
+            max_safe_clusters = usable_data_sectors // self._sectors_per_cluster
+            if max_safe_clusters < self._total_clusters:
+                self._total_clusters = max_safe_clusters
+
         # Initialize base class and load FAT
         FAT12Base.__init__(self)
         self._load_fat()
