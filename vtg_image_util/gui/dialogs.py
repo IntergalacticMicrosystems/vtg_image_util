@@ -253,6 +253,22 @@ class PartitionSelectDialog(wx.Dialog):
 
         # Bind events
         self._list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_activate)
+        self._list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_selection_changed)
+        self._list.Bind(wx.EVT_LIST_ITEM_DESELECTED, self._on_selection_changed)
+
+        # Disable OK when nothing is selected
+        self._btn_ok = self.FindWindow(wx.ID_OK)
+        self._update_ok_state()
+
+    def _update_ok_state(self):
+        """Enable OK only when a partition is selected."""
+        if self._btn_ok:
+            self._btn_ok.Enable(self._list.GetFirstSelected() != -1)
+
+    def _on_selection_changed(self, event):
+        """Handle selection change in the partition list."""
+        self._update_ok_state()
+        event.Skip()
 
     def _on_activate(self, event):
         """Handle double-click on partition."""

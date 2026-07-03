@@ -50,7 +50,7 @@ ID_RECENT_CLEAR = wx.NewIdRef()
 
 # Recent file IDs (use a fixed range starting from a high ID)
 ID_RECENT_BASE = wx.ID_HIGHEST + 100
-ID_RECENT_MAX = 10
+ID_RECENT_MAX = 20
 
 
 class MainFrame(wx.Frame):
@@ -81,6 +81,8 @@ class MainFrame(wx.Frame):
         self._readonly = False
         self._dirty = False  # True if unsaved changes exist
         self._recent_menu: wx.Menu | None = None
+        # Maps menu item IDs to file paths for the recent files menu
+        self._recent_paths: dict[int, str] = {}
         # Clipboard for copy/paste: list of (path_components, entry) tuples
         self._clipboard: list[tuple[list[str], DirectoryEntry | CPMFileInfo]] = []
 
@@ -189,11 +191,13 @@ class MainFrame(wx.Frame):
         # Add recent files
         recent_files = self._prefs.get_recent_files()
 
+        self._recent_paths = {}
         if recent_files:
             for i, filepath in enumerate(recent_files[:ID_RECENT_MAX]):
                 # Create menu item with number prefix
                 label = f"&{i + 1}. {os.path.basename(filepath)}"
                 item_id = ID_RECENT_BASE + i
+                self._recent_paths[item_id] = filepath
                 self._recent_menu.Append(item_id, label, filepath)
                 self.Bind(wx.EVT_MENU, self._on_recent_file, id=item_id)
 
@@ -361,6 +365,30 @@ class MainFrame(wx.Frame):
             return self._disk.get_partition(self._partition_idx)
         return self._disk
 
+    def _entry_exists(self, disk, path: list[str]) -> bool:
+        """Check whether a file or directory exists on the disk image.
+
+        Works with FAT12 disks (find_entry) and CP/M disks (find_file,
+        which takes a bare filename since CP/M has no subdirectories).
+        """
+        finder = getattr(disk, 'find_entry', None)
+        if finder is not None:
+            try:
+                return finder(path) is not None
+            except V9KError:
+                return False
+        finder = getattr(disk, 'find_file', None)
+        if finder is not None and path:
+            return finder(path[-1]) is not None
+        return False
+
+    @staticmethod
+    def _is_same_or_descendant(src_path: list[str], dest_path: list[str]) -> bool:
+        """Check if dest_path equals or is inside src_path (case-insensitive)."""
+        src = [c.upper() for c in src_path]
+        dest = [c.upper() for c in dest_path]
+        return len(dest) >= len(src) and dest[:len(src)] == src
+
     def _build_path_display(self) -> str:
         """Build the path display string."""
         if not self._image_path:
@@ -420,9 +448,13 @@ class MainFrame(wx.Frame):
             "CHD images (*.chd)|*.chd|"
             "All files (*.*)|*.*"
         )
+        default_dir = self._prefs.get('last_open_dir', '') or ''
+        if not os.path.isdir(default_dir):
+            default_dir = ''
         with wx.FileDialog(
             self,
             "Open Disk Image",
+            defaultDir=default_dir,
             wildcard=wildcard,
             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST
         ) as dlg:
@@ -485,12 +517,17 @@ class MainFrame(wx.Frame):
                     self._partition_idx = partitions[0]['index']
                 else:
                     dlg = PartitionSelectDialog(self, partitions)
-                    if dlg.ShowModal() == wx.ID_OK:
-                        self._partition_idx = dlg.get_selected_partition()
-                    else:
+                    try:
+                        result = dlg.ShowModal()
+                        selected = dlg.get_selected_partition()
+                    finally:
+                        dlg.Destroy()
+                    if result != wx.ID_OK or selected < 0:
+                        # Cancelled (or no partition selected)
                         self._close_current_image()
+                        self._reset_ui_after_close()
                         return
-                    dlg.Destroy()
+                    self._partition_idx = selected
 
             elif self._image_type == 'ibmpc':
                 self._disk = IBMPCDiskImage(working_path, readonly=readonly)
@@ -509,6 +546,9 @@ class MainFrame(wx.Frame):
             # Add to recent files
             self._prefs.add_recent_file(path)
             self._update_recent_menu()
+
+            # Remember the directory for the next Open dialog
+            self._prefs.set('last_open_dir', os.path.dirname(os.path.abspath(path)))
 
         except CHDError as e:
             # Show a specific warning for unsupported CHD files
@@ -545,9 +585,11 @@ class MainFrame(wx.Frame):
             dlg.ShowModal()
             dlg.Destroy()
             self._close_current_image()
+            self._reset_ui_after_close()
         except V9KError as e:
             wx.MessageBox(str(e), "Error Opening Image", wx.OK | wx.ICON_ERROR, self)
             self._close_current_image()
+            self._reset_ui_after_close()
         except OSError as e:
             wx.MessageBox(
                 f"Failed to open file: {e}",
@@ -556,6 +598,7 @@ class MainFrame(wx.Frame):
                 self
             )
             self._close_current_image()
+            self._reset_ui_after_close()
 
     def _close_current_image(self):
         """Close the currently open image and clean up temp file."""
@@ -579,6 +622,13 @@ class MainFrame(wx.Frame):
         self._partition_idx = None
         self._current_path = []
         self._dirty = False
+
+    def _reset_ui_after_close(self):
+        """Reset the UI (file list, title, status) after an image is closed."""
+        self._refresh_file_list()
+        self._update_ui_state()
+        self.SetTitle("Vtg Disk Image Utility")
+        self._statusbar.SetStatusText("Ready", 0)
 
     def _check_save_before_close(self) -> bool:
         """
@@ -650,10 +700,7 @@ class MainFrame(wx.Frame):
 
         # Close the image
         self._close_current_image()
-        self._refresh_file_list()
-        self._update_ui_state()
-        self.SetTitle("Vtg Disk Image Utility")
-        self._statusbar.SetStatusText("Ready", 0)
+        self._reset_ui_after_close()
 
     def _update_title(self):
         """Update window title to reflect current state."""
@@ -678,10 +725,7 @@ class MainFrame(wx.Frame):
             return  # User cancelled
 
         self._close_current_image()
-        self._refresh_file_list()
-        self._update_ui_state()
-        self.SetTitle("Vtg Disk Image Utility")
-        self._statusbar.SetStatusText("Ready", 0)
+        self._reset_ui_after_close()
 
     def _on_exit(self, event):
         """Handle Exit menu action."""
@@ -706,27 +750,26 @@ class MainFrame(wx.Frame):
 
     def _on_recent_file(self, event):
         """Handle selection of a recent file."""
-        item_id = event.GetId()
-        index = item_id - ID_RECENT_BASE
-        recent_files = self._prefs.get_recent_files()
+        # Look up the concrete path bound to this menu item at build time
+        filepath = self._recent_paths.get(event.GetId())
+        if filepath is None:
+            return
 
-        if 0 <= index < len(recent_files):
-            filepath = recent_files[index]
-            if os.path.exists(filepath):
-                self._open_image(filepath)
-            else:
-                wx.MessageBox(
-                    f"File not found: {filepath}",
-                    "Error",
-                    wx.OK | wx.ICON_ERROR,
-                    self
-                )
-                # Remove from recent files and update menu
-                recent = self._prefs.get_recent_files()
-                if filepath in recent:
-                    recent.remove(filepath)
-                    self._prefs.set('recent_files', recent)
-                self._update_recent_menu()
+        if os.path.exists(filepath):
+            self._open_image(filepath)
+        else:
+            wx.MessageBox(
+                f"File not found: {filepath}",
+                "Error",
+                wx.OK | wx.ICON_ERROR,
+                self
+            )
+            # Remove from recent files and update menu
+            recent = self._prefs.get_recent_files()
+            if filepath in recent:
+                recent.remove(filepath)
+                self._prefs.set('recent_files', recent)
+            self._update_recent_menu()
 
     def _on_clear_recent(self, event):
         """Handle clearing of recent files list."""
@@ -874,19 +917,30 @@ class MainFrame(wx.Frame):
 
         disk = self._get_current_disk()
 
+        # Guard against pasting a folder into itself or one of its subfolders
+        for src_path, entry in self._clipboard:
+            if isinstance(entry, DirectoryEntry) and entry.is_directory:
+                dest_path = self._current_path + [entry.full_name]
+                if self._is_same_or_descendant(src_path, dest_path):
+                    wx.MessageBox(
+                        f"Cannot paste folder '{entry.full_name}' into itself "
+                        f"or one of its subfolders.",
+                        "Paste Error",
+                        wx.OK | wx.ICON_ERROR,
+                        self
+                    )
+                    return
+
         # Check for existing files and collect overwrites
         existing_files = []
         for src_path, entry in self._clipboard:
             dest_name = entry.full_name
             # Check if file exists in current directory
-            try:
-                disk.find_entry(self._current_path + [dest_name])
+            if self._entry_exists(disk, self._current_path + [dest_name]):
                 existing_files.append(dest_name)
-            except Exception:
-                pass  # File doesn't exist, OK to copy
 
-        # Warn about overwrites (once for all files)
-        if existing_files:
+        # Warn about overwrites (once for all files, if enabled in preferences)
+        if existing_files and self._prefs.get('confirm_overwrite', True):
             if len(existing_files) == 1:
                 msg = f"'{existing_files[0]}' already exists. Overwrite?"
             else:
@@ -940,11 +994,12 @@ class MainFrame(wx.Frame):
 
         finally:
             progress.Destroy()
-
-        # Refresh and update state
-        self._refresh_file_list()
-        if copied_files > 0 or copied_dirs > 0:
-            self._mark_dirty()
+            # Refresh and update state (even if an unexpected error escaped;
+            # _paste_directory marks dirty as soon as any sub-operation
+            # succeeds, so partial work is not lost)
+            self._refresh_file_list()
+            if copied_files > 0 or copied_dirs > 0:
+                self._mark_dirty()
 
         # Show result
         if errors:
@@ -968,14 +1023,26 @@ class MainFrame(wx.Frame):
 
     def _paste_directory(self, disk, src_path: list[str], dest_path: list[str]):
         """Recursively paste a directory."""
+        # Guard against copying a directory into itself
+        if self._is_same_or_descendant(src_path, dest_path):
+            src_display = "\\".join(src_path)
+            raise V9KError(f"Cannot copy '{src_display}' into itself")
+
+        # List the source entries BEFORE creating the destination directory,
+        # so a destination created inside the source can't appear in the
+        # listing and cause infinite recursion
+        entries = disk.list_files(src_path)
+
         # Create destination directory
         try:
             disk.create_directory(dest_path)
         except V9KError:
             pass  # May already exist
+        else:
+            if not self._dirty:
+                self._mark_dirty()
 
         # Copy contents
-        entries = disk.list_files(src_path)
         for entry in entries:
             if entry.is_dot_entry or entry.is_volume_label:
                 continue
@@ -988,6 +1055,8 @@ class MainFrame(wx.Frame):
             else:
                 data = disk.read_file(src_entry_path)
                 disk.write_file(dest_entry_path, data)
+                if not self._dirty:
+                    self._mark_dirty()
 
     def _on_select_all(self, event):
         """Select all files in the file list."""
@@ -1262,13 +1331,10 @@ class MainFrame(wx.Frame):
             except Exception:
                 dest_name = filename.upper()[:12]
 
-            try:
-                disk.find_entry(target_path + [dest_name])
+            if self._entry_exists(disk, target_path + [dest_name]):
                 existing_files.append(dest_name)
-            except Exception:
-                pass  # File doesn't exist
 
-        if existing_files:
+        if existing_files and self._prefs.get('confirm_overwrite', True):
             if len(existing_files) == 1:
                 msg = f"'{existing_files[0]}' already exists. Overwrite?"
             else:
@@ -1378,20 +1444,17 @@ class MainFrame(wx.Frame):
         # Build destination path (in target directory)
         dest_path = list(target_path) + [dos_name]
 
-        # Check if directory already exists and warn
-        try:
-            entry = disk.find_entry(target_path + [dos_name])
-            if entry:
-                result = wx.MessageBox(
-                    f"'{dos_name}' already exists. Files inside may be overwritten.\n\nContinue?",
-                    "Confirm Overwrite",
-                    wx.YES_NO | wx.ICON_QUESTION,
-                    self
-                )
-                if result != wx.YES:
-                    return
-        except Exception:
-            pass  # Directory doesn't exist, OK to create
+        # Check if directory already exists and warn (if enabled in preferences)
+        if (self._entry_exists(disk, target_path + [dos_name])
+                and self._prefs.get('confirm_overwrite', True)):
+            result = wx.MessageBox(
+                f"'{dos_name}' already exists. Files inside may be overwritten.\n\nContinue?",
+                "Confirm Overwrite",
+                wx.YES_NO | wx.ICON_QUESTION,
+                self
+            )
+            if result != wx.YES:
+                return
 
         # Count total items for progress
         total_items = sum(1 for _ in self._count_items_recursive(source_dir))
@@ -1580,32 +1643,36 @@ class MainFrame(wx.Frame):
         deleted_files = 0
         deleted_dirs = 0
 
-        # Delete files first
-        for idx, entry in files:
-            try:
-                path = list(self._current_path)
-                path.append(entry.full_name)
-                disk.delete_file(path)
-                deleted_files += 1
-            except V9KError as e:
-                errors.append(f"{entry.full_name}: {e}")
+        try:
+            # Delete files first
+            for idx, entry in files:
+                try:
+                    path = list(self._current_path)
+                    path.append(entry.full_name)
+                    disk.delete_file(path)
+                    deleted_files += 1
+                except V9KError as e:
+                    errors.append(f"{entry.full_name}: {e}")
 
-        # Delete directories (recursively)
-        for idx, entry in dirs:
-            try:
-                path = list(self._current_path)
-                path.append(entry.full_name)
-                disk.delete_directory(path, recursive=True)
-                deleted_dirs += 1
-            except V9KError as e:
-                errors.append(f"{entry.full_name}\\: {e}")
+            # Delete directories (recursively)
+            for idx, entry in dirs:
+                try:
+                    path = list(self._current_path)
+                    path.append(entry.full_name)
+                    disk.delete_directory(path, recursive=True)
+                    deleted_dirs += 1
+                except V9KError as e:
+                    errors.append(f"{entry.full_name}\\: {e}")
+                    # A failed recursive delete may still have removed some
+                    # of the folder's contents, so treat the image as modified
+                    self._mark_dirty()
 
-        # Refresh listing
-        self._refresh_file_list()
-
-        # Mark as dirty if anything was deleted
-        if deleted_files > 0 or deleted_dirs > 0:
-            self._mark_dirty()
+        finally:
+            # Refresh listing and mark dirty even if an unexpected error
+            # interrupted the loop after partial work
+            self._refresh_file_list()
+            if deleted_files > 0 or deleted_dirs > 0:
+                self._mark_dirty()
 
         # Show result
         total = deleted_files + deleted_dirs
@@ -1657,6 +1724,16 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
 
         if not folder_name:
+            return
+
+        # Names with embedded spaces are invalid on real DOS
+        if ' ' in folder_name:
+            wx.MessageBox(
+                "Folder names cannot contain spaces.",
+                "Invalid Name",
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
             return
 
         # Validate folder name
@@ -1741,12 +1818,33 @@ class MainFrame(wx.Frame):
         if not new_name or new_name == current_name:
             return
 
+        # Names with embedded spaces are invalid on real DOS
+        if ' ' in new_name:
+            wx.MessageBox(
+                "Names cannot contain spaces.",
+                "Invalid Name",
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
+            return
+
         # Validate new name
         try:
-            validate_filename(new_name)
+            name, ext = validate_filename(new_name)
         except Exception as e:
             wx.MessageBox(
                 f"Invalid filename: {e}",
+                "Invalid Name",
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
+            return
+
+        # Folders shouldn't have extensions (consistent with New Folder)
+        if (isinstance(entry, DirectoryEntry) and entry.is_directory
+                and ext.strip()):
+            wx.MessageBox(
+                "Folder names should not have extensions.",
                 "Invalid Name",
                 wx.OK | wx.ICON_WARNING,
                 self
@@ -1823,6 +1921,8 @@ class MainFrame(wx.Frame):
 
         disk = self._get_current_disk()
         temp_dir = create_temp_export_dir()
+        # Register the directory itself so it's removed on the next cleanup
+        self._drag_manager.register_temp_dir(temp_dir)
         temp_paths = []
 
         for internal_path in internal_paths:

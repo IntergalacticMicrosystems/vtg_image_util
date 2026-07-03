@@ -49,8 +49,18 @@ class DragDropManager:
     def __init__(self, parent: wx.Window):
         self._parent = parent
         self._temp_files: list[str] = []
+        self._temp_dirs: list[str] = []
         self._export_callback: Callable[[list[str]], list[str]] | None = None
         self._import_callback: Callable[[list[str]], bool] | None = None
+
+    def register_temp_dir(self, path: str):
+        """
+        Register a temporary directory to be removed on the next cleanup.
+
+        Export callbacks should register the directory they create so it
+        doesn't leak after the drag completes.
+        """
+        self._temp_dirs.append(path)
 
     def set_export_callback(self, callback: Callable[[list[str]], list[str]]):
         """
@@ -146,6 +156,11 @@ class DragDropManager:
             except OSError:
                 pass  # Ignore cleanup errors
         self._temp_files = []
+
+        # Remove the parent export directories themselves
+        for path in self._temp_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+        self._temp_dirs = []
 
     def cleanup(self):
         """Clean up all resources."""

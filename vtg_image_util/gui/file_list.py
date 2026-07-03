@@ -30,7 +30,7 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
     def __init__(self, parent):
         wx.ListCtrl.__init__(
             self, parent,
-            style=wx.LC_REPORT | wx.LC_VIRTUAL | wx.LC_EDIT_LABELS | wx.BORDER_SUNKEN
+            style=wx.LC_REPORT | wx.LC_VIRTUAL | wx.BORDER_SUNKEN
         )
         listmix.ListCtrlAutoWidthMixin.__init__(self)
 
@@ -94,10 +94,12 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
         Args:
             filter_text: Text to filter by (supports wildcards * and ?)
         """
+        selected_names = self._get_selected_names()
         self._filter_text = filter_text.strip()
         self._apply_filter()
         self._sort_entries()
         self.SetItemCount(self._get_display_count())
+        self._restore_selection(selected_names)
         self.Refresh()
 
     def get_filter(self) -> str:
@@ -126,6 +128,34 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
                 entry for entry in self._all_entries
                 if filter_text in self._get_name(entry).upper()
             ]
+
+    def _get_selected_names(self) -> list[str]:
+        """Get the full names of the currently selected entries."""
+        names = []
+        item = self.GetFirstSelected()
+        while item != -1:
+            entry = self._get_entry_at(item)
+            if entry is not None:
+                names.append(self._get_name(entry))
+            item = self.GetNextSelected(item)
+        return names
+
+    def _restore_selection(self, names: list[str]):
+        """Re-select entries matching the given names after a reorder/filter."""
+        # Clear the current (index-based) selection
+        item = self.GetFirstSelected()
+        while item != -1:
+            self.Select(item, on=False)
+            item = self.GetNextSelected(item)
+
+        if not names:
+            return
+
+        name_set = set(names)
+        offset = 1 if self._show_parent_entry else 0
+        for i, entry in enumerate(self._entries):
+            if self._get_name(entry) in name_set:
+                self.Select(i + offset, on=True)
 
     def get_selected_entries(self) -> list[tuple[int, DirectoryEntry | CPMFileInfo | None]]:
         """
@@ -207,7 +237,9 @@ class FileListCtrl(wx.ListCtrl, listmix.ListCtrlAutoWidthMixin):
         else:
             self._sort_column = col
             self._sort_ascending = True
+        selected_names = self._get_selected_names()
         self._sort_entries()
+        self._restore_selection(selected_names)
         self.Refresh()
 
     # Virtual list control methods
@@ -394,10 +426,14 @@ class FileListPanel(wx.Panel):
 
     def set_path(self, path: str):
         """Set the displayed path."""
+        path_changed = (path != self._current_path)
         self._current_path = path
         self._path_text.SetValue(path)
-        # Clear filter when changing directories
-        self._search_box.SetValue("")
+        # Clear filter only when actually changing directories, so a refresh
+        # of the same directory (delete, paste, rename, F5) keeps the filter
+        if path_changed:
+            self._search_box.SetValue("")
+            self._file_list.set_filter("")
 
     def get_path(self) -> str:
         """Get the current path."""
