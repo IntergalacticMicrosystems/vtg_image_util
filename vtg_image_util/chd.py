@@ -6,10 +6,14 @@ CHD files are containers for disk images (hard disks, CDs, etc.)
 with optional compression.
 
 Supported formats:
-- Uncompressed CHD (compressors[0] == 0) - full support
-- Compressed CHD with ZLIB/LZMA only - full support
-- Compressed CHD with MAME's custom Huffman/FLAC codecs - NOT SUPPORTED
+- Uncompressed CHD - full support
+- Compressed CHD with ZLIB, LZMA, or Huffman codecs - full support,
+  including the Huffman-encoded v5 hunk map (verified against its CRC)
+- FLAC-compressed hunks and parent (delta) CHDs - NOT SUPPORTED
   (Use chdman to convert: chdman extractraw -i input.chd -o output.img)
+
+A CHD may list an unsupported codec in its header without using it; only
+codecs actually referenced by the hunk map cause a CHDError.
 """
 
 import struct
@@ -45,16 +49,25 @@ CHD_CODEC_HUFFMAN = 0x68756666  # 'huff'
 CHD_CODEC_FLAC = 0x666c6163  # 'flac'
 
 # Codecs we can actually decode
-SUPPORTED_CODECS = {CHD_CODEC_NONE, CHD_CODEC_ZLIB, CHD_CODEC_LZMA}
-UNSUPPORTED_CODEC_NAMES = {
-    CHD_CODEC_HUFFMAN: 'huff (MAME Huffman)',
-    CHD_CODEC_FLAC: 'flac (MAME FLAC)',
+SUPPORTED_CODECS = {
+    CHD_CODEC_NONE, CHD_CODEC_ZLIB, CHD_CODEC_LZMA,
+    CHD_CODEC_HUFFMAN, CHD_CODEC_FLAC,
 }
 
 # Map entry compression types (for compressed CHDs)
+COMPRESSION_TYPE_0 = 0  # Codec slot 0..3
+COMPRESSION_TYPE_3 = 3
 COMPRESSION_NONE = 4    # Stored uncompressed
 COMPRESSION_SELF = 5    # Reference to another hunk in this file
 COMPRESSION_PARENT = 6  # Reference to parent CHD
+# Pseudo-types used only inside the compressed map encoding
+COMPRESSION_RLE_SMALL = 7
+COMPRESSION_RLE_LARGE = 8
+COMPRESSION_SELF_0 = 9
+COMPRESSION_SELF_1 = 10
+COMPRESSION_PARENT_SELF = 11
+COMPRESSION_PARENT_0 = 12
+COMPRESSION_PARENT_1 = 13
 
 # Metadata tags
 HARD_DISK_METADATA_TAG = 0x47444444  # 'GDDD'
@@ -63,6 +76,363 @@ HARD_DISK_METADATA_TAG = 0x47444444  # 'GDDD'
 class CHDError(DiskError):
     """CHD-specific errors."""
     pass
+
+
+def _crc16(data: bytes) -> int:
+    """CRC-16/CCITT (poly 0x1021, init 0xFFFF), as used by MAME."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc
+
+
+class _BitReader:
+    """MSB-first bit reader over a byte buffer (MAME bitstream_in)."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._bitpos = 0
+
+    def read(self, numbits: int) -> int:
+        value = 0
+        data = self._data
+        pos = self._bitpos
+        end = len(data) * 8
+        for _ in range(numbits):
+            if pos >= end:
+                raise CHDError("Bitstream overflow while decoding CHD data")
+            value = (value << 1) | ((data[pos >> 3] >> (7 - (pos & 7))) & 1)
+            pos += 1
+        self._bitpos = pos
+        return value
+
+
+class _HuffmanDecoder:
+    """
+    Canonical Huffman decoder matching MAME's huffman_context_base.
+
+    Trees arrive either RLE-encoded (used for the map's compression codes)
+    or Huffman-encoded via a small helper tree (used by the 'huff' codec).
+    """
+
+    def __init__(self, numcodes: int, maxbits: int):
+        self.numcodes = numcodes
+        self.maxbits = maxbits
+        self.numbits = [0] * numcodes
+        self._table: dict[tuple[int, int], int] = {}
+
+    def import_tree_rle(self, bits: _BitReader) -> None:
+        """Import an RLE-encoded tree (MAME import_tree_rle)."""
+        if self.maxbits >= 16:
+            entry_bits = 5
+        elif self.maxbits >= 8:
+            entry_bits = 4
+        else:
+            entry_bits = 3
+
+        curnode = 0
+        while curnode < self.numcodes:
+            nodebits = bits.read(entry_bits)
+            if nodebits != 1:
+                self.numbits[curnode] = nodebits
+                curnode += 1
+            else:
+                nodebits = bits.read(entry_bits)
+                if nodebits == 1:
+                    self.numbits[curnode] = nodebits
+                    curnode += 1
+                else:
+                    repcount = bits.read(entry_bits) + 3
+                    if curnode + repcount > self.numcodes:
+                        raise CHDError("Invalid RLE Huffman tree in CHD")
+                    for _ in range(repcount):
+                        self.numbits[curnode] = nodebits
+                        curnode += 1
+
+        self._assign_canonical_codes()
+
+    def import_tree_huffman(self, bits: _BitReader) -> None:
+        """Import a Huffman-encoded tree (MAME import_tree_huffman)."""
+        small = _HuffmanDecoder(24, 6)
+        small.numbits[0] = bits.read(3)
+        start = bits.read(3) + 1
+        count = 0
+        for index in range(1, 24):
+            if index < start or count == 7:
+                small.numbits[index] = 0
+            else:
+                count = bits.read(3)
+                small.numbits[index] = 0 if count == 7 else count
+        small._assign_canonical_codes()
+
+        # Maximum length of an RLE count
+        temp = self.numcodes - 9
+        rlefullbits = 0
+        while temp != 0:
+            temp >>= 1
+            rlefullbits += 1
+
+        last = 0
+        curcode = 0
+        while curcode < self.numcodes:
+            value = small.decode_one(bits)
+            if value != 0:
+                last = value - 1
+                self.numbits[curcode] = last
+                curcode += 1
+            else:
+                repcount = bits.read(3) + 2
+                if repcount == 7 + 2:
+                    repcount += bits.read(rlefullbits)
+                while repcount != 0 and curcode < self.numcodes:
+                    self.numbits[curcode] = last
+                    curcode += 1
+                    repcount -= 1
+
+        self._assign_canonical_codes()
+
+    def _assign_canonical_codes(self) -> None:
+        """Assign canonical codes (MAME assign_canonical_codes)."""
+        bithisto = [0] * 33
+        for curcode in range(self.numcodes):
+            length = self.numbits[curcode]
+            if length > self.maxbits:
+                raise CHDError("Huffman code length exceeds maximum")
+            if length <= 32:
+                bithisto[length] += 1
+
+        curstart = 0
+        for codelen in range(32, 0, -1):
+            nextstart = (curstart + bithisto[codelen]) >> 1
+            if codelen != 1 and nextstart * 2 != curstart + bithisto[codelen]:
+                raise CHDError("Inconsistent Huffman tree in CHD")
+            bithisto[codelen] = curstart
+            curstart = nextstart
+
+        self._table = {}
+        for curcode in range(self.numcodes):
+            length = self.numbits[curcode]
+            if length > 0:
+                self._table[(length, bithisto[length])] = curcode
+                bithisto[length] += 1
+
+    def decode_one(self, bits: _BitReader) -> int:
+        """Decode a single symbol from the bitstream."""
+        accum = 0
+        for length in range(1, self.maxbits + 1):
+            accum = (accum << 1) | bits.read(1)
+            symbol = self._table.get((length, accum))
+            if symbol is not None:
+                return symbol
+        raise CHDError("Invalid Huffman code in CHD data")
+
+
+# FLAC fixed-predictor coefficients by order
+_FLAC_FIXED_COEFFS = [
+    [],
+    [1],
+    [2, -1],
+    [3, -3, 1],
+    [4, -6, 4, -1],
+]
+
+
+class _FlacFrameDecoder:
+    """
+    Minimal FLAC frame decoder for MAME's CHD 'flac' codec.
+
+    MAME stores raw FLAC frames (no fLaC container): 16-bit samples,
+    2 channels. Only the features libFLAC emits for that configuration
+    are implemented: constant, verbatim, fixed and LPC subframes with
+    partitioned Rice residuals, and all four stereo decorrelation modes.
+    """
+
+    _BLOCK_SIZES = [0, 192, 576, 1152, 2304, 4608, -1, -2,
+                    256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+
+    def __init__(self, data: bytes):
+        self._bits = _BitReader(data)
+
+    def _read_signed(self, numbits: int) -> int:
+        value = self._bits.read(numbits)
+        if value & (1 << (numbits - 1)):
+            value -= 1 << numbits
+        return value
+
+    def _read_utf8_number(self) -> int:
+        first = self._bits.read(8)
+        if first < 0x80:
+            return first
+        ones = 0
+        mask = 0x80
+        while first & mask:
+            ones += 1
+            mask >>= 1
+        value = first & (mask - 1)
+        for _ in range(ones - 1):
+            value = (value << 6) | (self._bits.read(8) & 0x3F)
+        return value
+
+    def decode_frame(self) -> list[int]:
+        """Decode one frame; returns interleaved samples."""
+        bits = self._bits
+
+        # Frame header
+        sync = bits.read(14)
+        if sync != 0x3FFE:
+            raise CHDError(f"Invalid FLAC frame sync: {sync:#x}")
+        bits.read(1)  # reserved
+        bits.read(1)  # blocking strategy
+        block_size_code = bits.read(4)
+        sample_rate_code = bits.read(4)
+        channel_assignment = bits.read(4)
+        sample_size_code = bits.read(3)
+        bits.read(1)  # reserved
+        self._read_utf8_number()  # frame number
+
+        if block_size_code == 6:
+            block_size = bits.read(8) + 1
+        elif block_size_code == 7:
+            block_size = bits.read(16) + 1
+        else:
+            block_size = self._BLOCK_SIZES[block_size_code]
+            if block_size <= 0:
+                raise CHDError("Invalid FLAC block size code")
+        if sample_rate_code == 12:
+            bits.read(8)
+        elif sample_rate_code in (13, 14):
+            bits.read(16)
+
+        sample_sizes = {1: 8, 2: 12, 4: 16, 5: 20, 6: 24, 7: 32}
+        bps = sample_sizes.get(sample_size_code)
+        if bps is None:
+            raise CHDError("Unsupported FLAC sample size")
+
+        if channel_assignment <= 7:
+            num_channels = channel_assignment + 1
+        else:
+            num_channels = 2
+        if num_channels != 2:
+            raise CHDError("Only 2-channel FLAC data is supported")
+
+        bits.read(8)  # header CRC-8 (whole-hunk CRC catches corruption)
+
+        # Subframes; side channels carry one extra bit
+        channels = []
+        for ch in range(2):
+            ch_bps = bps
+            if channel_assignment == 8 and ch == 1:
+                ch_bps += 1
+            elif channel_assignment == 9 and ch == 0:
+                ch_bps += 1
+            elif channel_assignment == 10 and ch == 1:
+                ch_bps += 1
+            channels.append(self._decode_subframe(block_size, ch_bps))
+
+        # Undo stereo decorrelation
+        left, right = channels
+        if channel_assignment == 8:  # left/side
+            right = [l - s for l, s in zip(left, right)]
+        elif channel_assignment == 9:  # right/side
+            left, right = [r + s for s, r in zip(left, right)], right
+        elif channel_assignment == 10:  # mid/side
+            mid, side = left, right
+            left = []
+            right = []
+            for m, s in zip(mid, side):
+                m = (m << 1) | (s & 1)
+                left.append((m + s) >> 1)
+                right.append((m - s) >> 1)
+
+        # Frame footer: pad to byte boundary + CRC-16
+        bits._bitpos = (bits._bitpos + 7) & ~7
+        bits.read(16)
+
+        samples = [0] * (block_size * 2)
+        samples[0::2] = left
+        samples[1::2] = right
+        return samples
+
+    def _decode_subframe(self, block_size: int, bps: int) -> list[int]:
+        bits = self._bits
+        if bits.read(1) != 0:
+            raise CHDError("Invalid FLAC subframe padding")
+        subframe_type = bits.read(6)
+        wasted = 0
+        if bits.read(1):
+            wasted = 1
+            while bits.read(1) == 0:
+                wasted += 1
+        bps -= wasted
+
+        if subframe_type == 0:  # CONSTANT
+            value = self._read_signed(bps)
+            samples = [value] * block_size
+        elif subframe_type == 1:  # VERBATIM
+            samples = [self._read_signed(bps) for _ in range(block_size)]
+        elif 8 <= subframe_type <= 12:  # FIXED, order 0-4
+            order = subframe_type & 7
+            samples = [self._read_signed(bps) for _ in range(order)]
+            residuals = self._decode_residuals(block_size, order)
+            coeffs = _FLAC_FIXED_COEFFS[order]
+            for i in range(order, block_size):
+                prediction = sum(
+                    c * samples[i - 1 - j] for j, c in enumerate(coeffs))
+                samples.append(prediction + residuals[i - order])
+        elif subframe_type >= 32:  # LPC
+            order = (subframe_type & 31) + 1
+            samples = [self._read_signed(bps) for _ in range(order)]
+            precision = bits.read(4) + 1
+            if precision == 16:
+                raise CHDError("Invalid FLAC LPC precision")
+            shift = self._read_signed(5)
+            coeffs = [self._read_signed(precision) for _ in range(order)]
+            residuals = self._decode_residuals(block_size, order)
+            for i in range(order, block_size):
+                prediction = sum(
+                    c * samples[i - 1 - j] for j, c in enumerate(coeffs))
+                samples.append((prediction >> shift) + residuals[i - order])
+        else:
+            raise CHDError(f"Unsupported FLAC subframe type: {subframe_type}")
+
+        if wasted:
+            samples = [s << wasted for s in samples]
+        return samples
+
+    def _decode_residuals(self, block_size: int, order: int) -> list[int]:
+        bits = self._bits
+        method = bits.read(2)
+        if method > 1:
+            raise CHDError("Unsupported FLAC residual coding method")
+        param_bits = 4 if method == 0 else 5
+        escape = (1 << param_bits) - 1
+
+        partition_order = bits.read(4)
+        partitions = 1 << partition_order
+        samples_per_partition = block_size >> partition_order
+
+        residuals = []
+        for p in range(partitions):
+            count = samples_per_partition - (order if p == 0 else 0)
+            param = bits.read(param_bits)
+            if param == escape:
+                raw_bits = bits.read(5)
+                for _ in range(count):
+                    residuals.append(
+                        self._read_signed(raw_bits) if raw_bits else 0)
+            else:
+                for _ in range(count):
+                    quotient = 0
+                    while bits.read(1) == 0:
+                        quotient += 1
+                    unsigned = (quotient << param) | bits.read(param)
+                    residuals.append((unsigned >> 1) ^ -(unsigned & 1))
+        return residuals
 
 
 class CHDHeader:
@@ -102,7 +472,8 @@ class CHDMapEntry:
     def __init__(self):
         self.compression: int = 0  # Compression type
         self.comp_length: int = 0  # Compressed length
-        self.offset: int = 0       # File offset or reference
+        self.offset: int = 0       # File offset or hunk reference
+        self.crc: int | None = None  # CRC-16 of decompressed hunk, if known
 
 
 class CHDFile:
@@ -123,8 +494,13 @@ class CHDFile:
 
         # Open and parse
         self._file = open(path, 'rb')
-        self._parse_header()
-        self._parse_map()
+        try:
+            self._parse_header()
+            self._parse_map()
+        except Exception:
+            self._file.close()
+            self._file = None
+            raise
 
     def _parse_header(self) -> None:
         """Parse the CHD header."""
@@ -178,28 +554,16 @@ class CHDFile:
         self._header.sha1 = header_data[84:104]
         self._header.parent_sha1 = header_data[104:124]
 
-        # Check for unsupported codecs
-        if self._header.is_compressed:
-            unsupported = []
-            for codec in self._header.compressors:
-                if codec != 0 and codec not in SUPPORTED_CODECS:
-                    codec_name = UNSUPPORTED_CODEC_NAMES.get(
-                        codec,
-                        codec.to_bytes(4, 'big').decode('ascii', errors='replace')
-                    )
-                    unsupported.append(codec_name)
-
-            if unsupported:
-                raise CHDError(
-                    f"CHD uses unsupported codec(s): {', '.join(unsupported)}. "
-                    f"Convert to raw format using: chdman extractraw -i {self.path} -o output.img"
-                )
+        # Note: codec support is checked against the codecs the hunk map
+        # actually uses (in _parse_map), not the header's codec list — a CHD
+        # may list a codec it never uses.
 
         # Check for parent dependency
         if self._header.has_parent:
             raise CHDError(
-                "CHD requires a parent file (delta CHD). "
-                "Convert to standalone format using: chdman extractraw -i {self.path} -o output.img"
+                f"CHD requires a parent file (delta CHD). "
+                f"Convert to standalone format using: "
+                f"chdman extractraw -i {self.path} -o output.img"
             )
 
     def _parse_map(self) -> None:
@@ -234,59 +598,144 @@ class CHDFile:
             self._map.append(entry)
 
     def _parse_compressed_map(self) -> None:
-        """Parse compressed v5 map.
+        """
+        Parse the compressed v5 map (MAME chd_file::decompress_v5_map).
 
-        Note: This is a simplified implementation that only works for CHDs
-        using ZLIB or LZMA compression. MAME's compressed map format uses
-        a complex Huffman-encoded bitstream that we don't fully support.
+        The map is a Huffman-encoded bitstream: first the per-hunk
+        compression types (with RLE escape codes), then per-hunk
+        length/offset/CRC fields. A CRC-16 over the reconstructed map
+        verifies the decode was bit-exact.
         """
         self._file.seek(self._header.map_offset)
 
-        # Read compressed map header (16 bytes)
+        # Map header (16 bytes)
         map_header = self._file.read(16)
         if len(map_header) < 16:
             raise CHDError("Compressed map header too small")
 
         comp_length = struct.unpack_from('>I', map_header, 0)[0]
-        first_offset_bytes = map_header[4:10]
-        first_offset = int.from_bytes(first_offset_bytes, 'big')
+        first_offset = int.from_bytes(map_header[4:10], 'big')
+        map_crc = struct.unpack_from('>H', map_header, 10)[0]
         length_bits = map_header[12]
-        hunk_bits = map_header[13]
+        self_bits = map_header[13]
+        parent_bits = map_header[14]
 
-        # Read compressed map data
         comp_data = self._file.read(comp_length)
+        if len(comp_data) < comp_length:
+            raise CHDError("Compressed map data truncated")
 
-        # Try to decode the map - this may fail for complex CHDs
-        try:
-            self._decode_simple_map(comp_data, first_offset, length_bits, hunk_bits)
-        except Exception as e:
-            raise CHDError(
-                f"Failed to decode CHD map: {e}. "
-                f"Convert to raw format using: chdman extractraw -i {self.path} -o output.img"
-            )
-
-    def _decode_simple_map(self, data: bytes, first_offset: int,
-                           length_bits: int, hunk_bits: int) -> None:
-        """Decode map for simple ZLIB/LZMA compressed CHDs.
-
-        This is a simplified decoder that assumes simple compression patterns.
-        Complex CHDs with Huffman-encoded maps will fail here.
-        """
         hunk_count = self._header.hunk_count
         hunk_bytes = self._header.hunk_bytes
+        unit_bytes = self._header.unit_bytes
+        bits = _BitReader(comp_data)
 
-        # For simple CHDs, each hunk might be stored sequentially
-        # We'll try to create a simple linear map
-        current_offset = first_offset
+        # First, decode the compression type for each hunk
+        decoder = _HuffmanDecoder(16, 8)
+        decoder.import_tree_rle(bits)
 
-        for i in range(hunk_count):
+        comp_types = []
+        last_comp = 0
+        rep_count = 0
+        for _ in range(hunk_count):
+            if rep_count > 0:
+                comp_types.append(last_comp)
+                rep_count -= 1
+                continue
+            val = decoder.decode_one(bits)
+            if val == COMPRESSION_RLE_SMALL:
+                comp_types.append(last_comp)
+                rep_count = 2 + decoder.decode_one(bits)
+            elif val == COMPRESSION_RLE_LARGE:
+                comp_types.append(last_comp)
+                rep_count = 2 + 16 + (decoder.decode_one(bits) << 4)
+                rep_count += decoder.decode_one(bits)
+            else:
+                last_comp = val
+                comp_types.append(val)
+
+        # Then, extract length/offset/CRC for each hunk
+        raw_map = bytearray(hunk_count * 12)
+        cur_offset = first_offset
+        last_self = 0
+        last_parent = 0
+        for hunknum in range(hunk_count):
+            comp = comp_types[hunknum]
+            offset = cur_offset
+            length = 0
+            crc = None
+
+            if comp <= COMPRESSION_TYPE_3:
+                length = bits.read(length_bits)
+                cur_offset += length
+                crc = bits.read(16)
+            elif comp == COMPRESSION_NONE:
+                length = hunk_bytes
+                cur_offset += length
+                crc = bits.read(16)
+            elif comp == COMPRESSION_SELF:
+                offset = bits.read(self_bits)
+                last_self = offset
+            elif comp == COMPRESSION_PARENT:
+                offset = bits.read(parent_bits)
+                last_parent = offset
+            elif comp in (COMPRESSION_SELF_0, COMPRESSION_SELF_1):
+                if comp == COMPRESSION_SELF_1:
+                    last_self += 1
+                comp = COMPRESSION_SELF
+                offset = last_self
+            elif comp == COMPRESSION_PARENT_SELF:
+                comp = COMPRESSION_PARENT
+                offset = (hunknum * hunk_bytes) // unit_bytes
+                last_parent = offset
+            elif comp in (COMPRESSION_PARENT_0, COMPRESSION_PARENT_1):
+                if comp == COMPRESSION_PARENT_1:
+                    last_parent += hunk_bytes // unit_bytes
+                comp = COMPRESSION_PARENT
+                offset = last_parent
+            else:
+                raise CHDError(f"Invalid map compression type: {comp}")
+
+            base = hunknum * 12
+            raw_map[base] = comp
+            raw_map[base + 1:base + 4] = length.to_bytes(3, 'big')
+            raw_map[base + 4:base + 10] = offset.to_bytes(6, 'big')
+            raw_map[base + 10:base + 12] = (crc or 0).to_bytes(2, 'big')
+
             entry = CHDMapEntry()
-            # Assume simple sequential storage with hunk_bytes per entry
-            entry.compression = 0  # First codec slot
-            entry.offset = current_offset
-            entry.comp_length = hunk_bytes
-            current_offset += hunk_bytes
+            entry.compression = comp
+            entry.comp_length = length
+            entry.offset = offset
+            entry.crc = crc
             self._map.append(entry)
+
+        if _crc16(bytes(raw_map)) != map_crc:
+            raise CHDError(
+                f"CHD map checksum mismatch — map decode failed. "
+                f"Convert to raw format using: "
+                f"chdman extractraw -i {self.path} -o output.img"
+            )
+
+        # Reject only codecs the map actually uses
+        used_codecs = set()
+        for entry in self._map:
+            if entry.compression <= COMPRESSION_TYPE_3:
+                used_codecs.add(self._header.compressors[entry.compression])
+            elif entry.compression == COMPRESSION_PARENT:
+                raise CHDError(
+                    f"CHD references a parent file. Convert to standalone "
+                    f"format using: chdman extractraw -i {self.path} -o output.img"
+                )
+        unsupported = used_codecs - SUPPORTED_CODECS
+        if unsupported:
+            names = ', '.join(
+                c.to_bytes(4, 'big').decode('ascii', errors='replace')
+                for c in sorted(unsupported)
+            )
+            raise CHDError(
+                f"CHD uses unsupported codec(s): {names}. "
+                f"Convert to raw format using: "
+                f"chdman extractraw -i {self.path} -o output.img"
+            )
 
     def _read_hunk(self, hunk_num: int) -> bytes:
         """Read and decompress a single hunk."""
@@ -300,9 +749,9 @@ class CHDFile:
         entry = self._map[hunk_num]
         hunk_data: bytes
 
-        if entry.compression == COMPRESSION_NONE or entry.comp_length == 0:
-            # Uncompressed or unallocated
-            if entry.offset == 0:
+        if entry.compression == COMPRESSION_NONE:
+            if entry.offset == 0 and entry.comp_length == 0:
+                # Unallocated hunk (uncompressed map only)
                 hunk_data = b'\x00' * self._header.hunk_bytes
             else:
                 self._file.seek(entry.offset)
@@ -311,10 +760,10 @@ class CHDFile:
                     hunk_data += b'\x00' * (self._header.hunk_bytes - len(hunk_data))
 
         elif entry.compression == COMPRESSION_SELF:
-            # Reference to earlier hunk
+            # Reference to earlier hunk (offset is a hunk number)
             hunk_data = self._read_hunk(entry.offset)
 
-        elif entry.compression in (0, 1, 2, 3):
+        elif entry.compression <= COMPRESSION_TYPE_3:
             # Compressed with codec from slot
             codec = self._header.compressors[entry.compression]
             self._file.seek(entry.offset)
@@ -323,6 +772,14 @@ class CHDFile:
 
         else:
             raise CHDError(f"Unknown compression type: {entry.compression}")
+
+        if len(hunk_data) != self._header.hunk_bytes:
+            raise CHDError(
+                f"Hunk {hunk_num} decompressed to {len(hunk_data)} bytes, "
+                f"expected {self._header.hunk_bytes}"
+            )
+        if entry.crc is not None and _crc16(hunk_data) != entry.crc:
+            raise CHDError(f"Hunk {hunk_num} failed CRC check — corrupt CHD data")
 
         # Cache the result
         if len(self._hunk_cache) < 64:  # Limit cache size
@@ -338,34 +795,87 @@ class CHDFile:
             return self._decompress_zlib(data)
         elif codec == CHD_CODEC_LZMA:
             return self._decompress_lzma(data)
+        elif codec == CHD_CODEC_HUFFMAN:
+            return self._decompress_huffman(data)
+        elif codec == CHD_CODEC_FLAC:
+            return self._decompress_flac(data)
         else:
             codec_str = codec.to_bytes(4, 'big').decode('ascii', errors='replace')
             raise CHDError(f"Unsupported codec: {codec_str}")
 
     def _decompress_zlib(self, data: bytes) -> bytes:
-        """Decompress zlib data."""
+        """Decompress raw-deflate data (MAME zlib codec has no header)."""
         try:
-            # Try raw deflate first (no header)
             return zlib.decompress(data, -15)
         except zlib.error:
-            # Try with zlib header
-            return zlib.decompress(data)
+            try:
+                return zlib.decompress(data)
+            except zlib.error as e:
+                raise CHDError(f"Corrupt zlib hunk data: {e}")
 
     def _decompress_lzma(self, data: bytes) -> bytes:
-        """Decompress LZMA data."""
+        """
+        Decompress LZMA data. MAME's lzma codec stores a raw LZMA1 stream
+        with no properties header; the properties are the encoder defaults
+        (lc=3, lp=0, pb=2) with the dictionary sized from the hunk size.
+        """
         if not HAS_LZMA:
             raise CHDError("LZMA compression requires the lzma module")
-        if len(data) < 5:
-            raise CHDError("LZMA data too small")
-        # CHD uses raw LZMA stream with properties byte
-        props = data[0]
-        lc = props % 9
-        lp = (props // 9) % 5
-        pb = (props // 9) // 5
-        decompressor = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=[
-            {'id': lzma.FILTER_LZMA1, 'lc': lc, 'lp': lp, 'pb': pb}
-        ])
-        return decompressor.decompress(data[5:])
+
+        # Mirror LzmaEncProps_Normalize for level 9 / reduceSize = hunk size:
+        # the dictionary shrinks to the smallest power of two (or 3 << k)
+        # >= the hunk size, bounded below at 4KB
+        hunk_bytes = self._header.hunk_bytes
+        dict_size = 1 << 26  # level 9 default (64MB)
+        if hunk_bytes < dict_size:
+            for bits in range(11, 31):
+                if hunk_bytes <= (2 << bits):
+                    dict_size = 2 << bits
+                    break
+                if hunk_bytes <= (3 << bits):
+                    dict_size = 3 << bits
+                    break
+
+        filters = [{
+            'id': lzma.FILTER_LZMA1,
+            'lc': 3, 'lp': 0, 'pb': 2,
+            'dict_size': dict_size,
+        }]
+        try:
+            decompressor = lzma.LZMADecompressor(
+                format=lzma.FORMAT_RAW, filters=filters)
+            return decompressor.decompress(data, self._header.hunk_bytes)
+        except lzma.LZMAError as e:
+            raise CHDError(f"Corrupt LZMA hunk data: {e}")
+
+    def _decompress_huffman(self, data: bytes) -> bytes:
+        """Decompress MAME 'huff' codec data (8-bit Huffman coded bytes)."""
+        bits = _BitReader(data)
+        decoder = _HuffmanDecoder(256, 16)
+        decoder.import_tree_huffman(bits)
+        return bytes(
+            decoder.decode_one(bits) for _ in range(self._header.hunk_bytes)
+        )
+
+    def _decompress_flac(self, data: bytes) -> bytes:
+        """
+        Decompress MAME 'flac' codec data: an endianness marker byte
+        ('L' or 'B') followed by raw FLAC frames of 16-bit stereo samples.
+        """
+        if not data or data[0] not in (ord('L'), ord('B')):
+            raise CHDError("Invalid FLAC hunk endianness marker")
+        byteorder = 'little' if data[0] == ord('L') else 'big'
+
+        total_samples = self._header.hunk_bytes // 2
+        decoder = _FlacFrameDecoder(data[1:])
+        out = bytearray()
+        decoded = 0
+        while decoded < total_samples:
+            samples = decoder.decode_frame()
+            decoded += len(samples)
+            for s in samples:
+                out += (s & 0xFFFF).to_bytes(2, byteorder)
+        return bytes(out[:self._header.hunk_bytes])
 
     # File-like interface
 
