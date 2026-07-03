@@ -77,13 +77,26 @@ class V9KCPMDiskImage:
         mode = 'rb' if readonly else 'r+b'
         try:
             self._file = open(path, mode)
-        except FileNotFoundError as e:
-            raise DiskError(f"Disk image not found: {path}") from e
-        except PermissionError as e:
-            raise DiskError(f"Permission denied: {path}") from e
+        except OSError as e:
+            # Note: the builtin FileNotFoundError is an OSError; the custom
+            # FileNotFoundError imported above is for in-image lookups only.
+            raise DiskError(f"Cannot open disk image: {path}: {e}") from e
 
-        # Auto-detect directory start sector (some disks use 76, others 94)
-        self.dir_start_sector = self._detect_dir_sector()
+        try:
+            # Media capacity in sectors/blocks, so writes never extend the image
+            self._file.seek(0, 2)
+            self._total_sectors = self._file.tell() // self.SECTOR_SIZE
+            data_sectors = max(0, self._total_sectors - self.DATA_START_SECTOR)
+            self._max_blocks = min(
+                CPM_MAX_BLOCKS, data_sectors // self.SECTORS_PER_BLOCK
+            )
+
+            # Auto-detect directory start sector (some disks use 76, others 94)
+            self.dir_start_sector = self._detect_dir_sector()
+        except Exception:
+            self._file.close()
+            self._file = None
+            raise
 
         # Load directory
         self._dir_cache: list[CPMDirectoryEntry] | None = None
@@ -157,6 +170,12 @@ class V9KCPMDiskImage:
             raise DiskError("Disk is read-only")
         if len(data) != self.SECTOR_SIZE:
             raise DiskError(f"Sector data must be {self.SECTOR_SIZE} bytes")
+        # Never grow the image: a write past the end means corrupt geometry
+        if sector < 0 or sector >= self._total_sectors:
+            raise DiskError(
+                f"Sector {sector} is outside the disk image "
+                f"(0-{self._total_sectors - 1})"
+            )
         self._file.seek(sector * self.SECTOR_SIZE)
         self._file.write(data)
         self._dirty = True
@@ -250,11 +269,32 @@ class V9KCPMDiskImage:
 
             for i in range(16):
                 entry_data = data[i * CPM_DIR_ENTRY_SIZE:(i + 1) * CPM_DIR_ENTRY_SIZE]
-                # Free if user byte is 0xE5 (deleted) or 0x00 (never used)
-                if entry_data[0] == CPM_DELETED or entry_data[0] == 0x00:
+                # Free if deleted (0xE5). A 0x00 user byte is user 0 — a real
+                # file — so only an entirely blank entry counts as never-used.
+                if entry_data[0] == CPM_DELETED:
+                    return (sector, i)
+                if entry_data[0] == 0x00 and not any(entry_data):
                     return (sector, i)
 
         raise DirectoryFullError("No free directory entries")
+
+    def _count_free_dir_slots(self) -> int:
+        """Count free directory entry slots."""
+        count = 0
+        for sector_offset in range(self.DIR_SECTORS):
+            sector = self.dir_start_sector + (sector_offset * self.DIR_INTERLEAVE)
+            try:
+                data = self.read_sector(sector)
+            except DiskError:
+                continue
+
+            for i in range(16):
+                entry_data = data[i * CPM_DIR_ENTRY_SIZE:(i + 1) * CPM_DIR_ENTRY_SIZE]
+                if entry_data[0] == CPM_DELETED:
+                    count += 1
+                elif entry_data[0] == 0x00 and not any(entry_data):
+                    count += 1
+        return count
 
     def _write_dir_entry(self, sector: int, index: int, entry: CPMDirectoryEntry) -> None:
         """Write a directory entry at the specified location."""
@@ -277,27 +317,29 @@ class V9KCPMDiskImage:
                 used.update(entry.blocks)
         return used
 
+    def _free_block_numbers(self, exclude_used: set[int] | None = None) -> list[int]:
+        """
+        List free allocation blocks on the actual media.
+
+        Block 0 is never allocatable: a 0 in an extent's block list means
+        "unused pointer", so a file cannot reference block 0.
+        """
+        used = exclude_used if exclude_used is not None else self._get_used_blocks()
+        return [b for b in range(1, self._max_blocks) if b not in used]
+
     def _find_free_block(self) -> int:
         """Find a free allocation block."""
-        used = self._get_used_blocks()
-        for block in range(CPM_MAX_BLOCKS):
-            if block not in used:
-                return block
-        raise DiskFullError("No free blocks on disk")
+        free = self._free_block_numbers()
+        if not free:
+            raise DiskFullError("No free blocks on disk")
+        return free[0]
 
     def _allocate_blocks(self, count: int) -> list[int]:
         """Allocate the specified number of blocks."""
-        used = self._get_used_blocks()
-        blocks = []
-        for block in range(CPM_MAX_BLOCKS):
-            if block not in used:
-                blocks.append(block)
-                used.add(block)
-                if len(blocks) >= count:
-                    break
-        if len(blocks) < count:
-            raise DiskFullError(f"Need {count} blocks, only {len(blocks)} available")
-        return blocks
+        free = self._free_block_numbers()
+        if len(free) < count:
+            raise DiskFullError(f"Need {count} blocks, only {len(free)} available")
+        return free[:count]
 
     # -------------------------------------------------------------------------
     # File operations (read)
@@ -427,18 +469,33 @@ class V9KCPMDiskImage:
         filename = path[-1]
         name, ext = validate_filename(filename)
 
-        # Check if file already exists and delete it
+        # Calculate required blocks (an empty file needs none)
+        num_blocks = (len(data) + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
+
+        # Check the new file fits BEFORE deleting an existing version, so a
+        # failed overwrite never destroys the original file. Blocks and
+        # directory slots freed by the deletion count as available.
         existing = self.find_file(filename)
+        existing_blocks: set[int] = set()
+        existing_extents = 0
+        if existing:
+            for extent in existing.extents:
+                existing_blocks.update(extent.blocks)
+            existing_extents = len(existing.extents)
+
+        used = self._get_used_blocks() - existing_blocks
+        free = self._free_block_numbers(exclude_used=used)
+        if len(free) < num_blocks:
+            raise DiskFullError(f"Need {num_blocks} blocks, only {len(free)} available")
+
+        num_extents = max(1, (num_blocks + CPM_BLOCKS_PER_EXTENT - 1) // CPM_BLOCKS_PER_EXTENT)
+        if self._count_free_dir_slots() + existing_extents < num_extents:
+            raise DirectoryFullError("No free directory entries")
+
         if existing:
             self.delete_file(path)
 
-        # Calculate required blocks
-        num_blocks = (len(data) + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
-        if num_blocks == 0:
-            num_blocks = 1  # At least one block for empty files
-
-        # Allocate blocks
-        blocks = self._allocate_blocks(num_blocks)
+        blocks = free[:num_blocks]
 
         # Write data to blocks
         for i, block in enumerate(blocks):
@@ -452,13 +509,12 @@ class V9KCPMDiskImage:
         # Create directory entries (one per extent)
         # Each extent can hold 8 blocks (16-bit pointers) and 128 records (16KB)
         records_remaining = (len(data) + CPM_RECORD_SIZE - 1) // CPM_RECORD_SIZE
-        if records_remaining == 0:
-            records_remaining = 1
 
         extent_num = 0
         block_idx = 0
 
-        while block_idx < len(blocks):
+        # An empty file still needs one directory entry (0 records, no blocks)
+        while block_idx < len(blocks) or extent_num == 0:
             # Find free directory slot
             sector, slot_idx = self._find_free_dir_slot()
 
@@ -484,7 +540,7 @@ class V9KCPMDiskImage:
 
             self._write_dir_entry(sector, slot_idx, entry)
 
-            block_idx += len(extent_blocks)
+            block_idx += max(1, len(extent_blocks))
             records_remaining -= extent_records
             extent_num += 1
 
@@ -515,7 +571,12 @@ class V9KCPMDiskImage:
 
                 for i in range(16):
                     entry_data = data[i * CPM_DIR_ENTRY_SIZE:(i + 1) * CPM_DIR_ENTRY_SIZE]
-                    if entry_data[0] == CPM_DELETED or entry_data[0] == 0x00:
+                    # Skip deleted and never-used slots. A 0x00 user byte with
+                    # any other content is a real user-0 file — do not skip it,
+                    # or user-0 files become undeletable.
+                    if entry_data[0] == CPM_DELETED:
+                        continue
+                    if entry_data[0] == 0x00 and not any(entry_data):
                         continue
 
                     # Check if this is the extent we're looking for
