@@ -39,10 +39,19 @@ def main() -> int:
 
     subparsers = parser.add_subparsers(dest='command', required=True)
 
+    def add_common_flags(subparser):
+        """Allow global flags after the subcommand too (e.g. 'info x.img -v')."""
+        subparser.add_argument('-v', '--verbose', action='store_true',
+                               default=argparse.SUPPRESS, help='Show detailed output')
+        subparser.add_argument('-q', '--quiet', action='store_true',
+                               default=argparse.SUPPRESS, help='Suppress non-essential output')
+        subparser.add_argument('--json', action='store_true',
+                               default=argparse.SUPPRESS, help='Output in JSON format')
+
     # Verify command
     verify_parser = subparsers.add_parser('verify', help='Verify disk image integrity')
     verify_parser.add_argument('path', help='Disk image path to verify')
-    verify_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(verify_parser)
 
     # Create command
     create_parser = subparsers.add_parser('create', help='Create a new blank disk image')
@@ -54,13 +63,13 @@ def main() -> int:
     create_parser.add_argument('-l', '--label', help='Volume label (optional)')
     create_parser.add_argument('-f', '--force', action='store_true',
                                help='Overwrite existing file')
-    create_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(create_parser)
 
     # Info command
     info_parser = subparsers.add_parser('info', help='Show disk image information',
                                         epilog='Use -v for technical details.')
     info_parser.add_argument('path', help='Disk image path (image.img or image.img:N for partition)')
-    info_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(info_parser)
 
     # List command
     list_parser = subparsers.add_parser('list', help='List files or partitions',
@@ -68,7 +77,7 @@ def main() -> int:
     list_parser.add_argument('path', help='Disk image path (image.img or image.img:N:\\path)')
     list_parser.add_argument('-r', '--recursive', action='store_true',
                              help='List subdirectories recursively')
-    list_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(list_parser)
 
     # Copy command
     copy_parser = subparsers.add_parser('copy', help='Copy files to/from disk image',
@@ -77,7 +86,7 @@ def main() -> int:
     copy_parser.add_argument('dest', help='Destination path (use directory for wildcards)')
     copy_parser.add_argument('-r', '--recursive', action='store_true',
                              help='Copy subdirectories recursively')
-    copy_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(copy_parser)
 
     # Delete command
     delete_parser = subparsers.add_parser('delete', help='Delete file or directory from disk image',
@@ -85,7 +94,7 @@ def main() -> int:
     delete_parser.add_argument('path', help='File or directory to delete (image.img:\\FILE or image.img:N:\\FILE)')
     delete_parser.add_argument('-r', '--recursive', action='store_true',
                                help='Delete directories and their contents recursively')
-    delete_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(delete_parser)
 
     # Attr command
     attr_parser = subparsers.add_parser('attr', help='View or modify file attributes',
@@ -94,19 +103,19 @@ def main() -> int:
     attr_parser.add_argument('path', help='File path (image.img:\\FILE or image.img:N:\\FILE)')
     attr_parser.add_argument('modifications', nargs='*', metavar='MOD',
                              help='Attribute changes: +R +H +S +A to set, -R -H -S -A to clear')
-    attr_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(attr_parser)
 
     # Mkdir command
     mkdir_parser = subparsers.add_parser('mkdir', help='Create a directory on disk image')
     mkdir_parser.add_argument('path', help='Directory path (image.img:\\DIRNAME or image.img:N:\\DIRNAME)')
-    mkdir_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(mkdir_parser)
 
     # Rmdir command
     rmdir_parser = subparsers.add_parser('rmdir', help='Remove a directory from disk image')
     rmdir_parser.add_argument('path', help='Directory path (image.img:\\DIRNAME or image.img:N:\\DIRNAME)')
     rmdir_parser.add_argument('-r', '--recursive', action='store_true',
                               help='Remove directory and all contents recursively')
-    rmdir_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    add_common_flags(rmdir_parser)
 
     args = parser.parse_args()
 

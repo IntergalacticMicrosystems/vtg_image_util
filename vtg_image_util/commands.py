@@ -2,7 +2,9 @@
 Command handlers for Victor 9000 and IBM PC disk image utilities.
 """
 
+import glob
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from .constants import (
@@ -12,11 +14,49 @@ from .constants import (
     ATTR_SYSTEM,
 )
 from .cpm import V9KCPMDiskImage
-from .exceptions import V9KError
+from .exceptions import FileNotFoundError as V9KFileNotFoundError, V9KError
 from .floppy import IBMPCDiskImage, V9KDiskImage
 from .formatter import OutputFormatter
 from .harddisk import V9KHardDiskImage
-from .utils import detect_image_type, has_wildcards, parse_image_path, split_internal_path
+from .utils import (
+    detect_image_type,
+    has_wildcards,
+    parse_image_path,
+    split_internal_path,
+    validate_filename,
+)
+
+
+@contextmanager
+def open_volume(image_path: str, partition: int | None, readonly: bool):
+    """
+    Open a disk image of any supported type and yield
+    (volume, display_prefix) where display_prefix is 'image:\\' or
+    'image:N:\\'. Closes the underlying image on exit.
+    """
+    image_type = detect_image_type(image_path)
+
+    if image_type == 'harddisk':
+        if partition is None:
+            raise V9KError(
+                "Partition number required for hard disk image (e.g., image.img:0:\\FILE)")
+        disk = V9KHardDiskImage(image_path, readonly=readonly)
+        volume = disk.get_partition(partition)
+        prefix = f"{image_path}:{partition}:\\"
+    elif image_type == 'ibmpc':
+        disk = volume = IBMPCDiskImage(image_path, readonly=readonly)
+        prefix = f"{image_path}:\\"
+    elif image_type == 'cpm':
+        disk = volume = V9KCPMDiskImage(image_path, readonly=readonly)
+        prefix = f"{image_path}:\\"
+    else:
+        disk = volume = V9KDiskImage(image_path, readonly=readonly)
+        prefix = f"{image_path}:\\"
+
+    try:
+        yield volume, prefix
+    finally:
+        disk.close()
 
 
 def cmd_list(args, formatter: OutputFormatter) -> int:
@@ -163,6 +203,15 @@ def cmd_copy(args, formatter: OutputFormatter) -> int:
 
     recursive = getattr(args, 'recursive', False)
 
+    # A path that parses as a bare image (no partition, no internal path) on
+    # one side of a copy is really a local file — e.g. copying floppy.img
+    # into hd.img:0:\, or extracting a file to C:\out\backup.dsk.
+    if source_image is not None and dest_image is not None:
+        if source_internal is None and source_partition is None and dest_internal is not None:
+            source_image = None
+        elif dest_internal is None and dest_partition is None and source_internal is not None:
+            dest_image = None
+
     # Determine direction
     if source_image is not None and source_internal is not None and dest_image is None:
         # Copy from image to filesystem
@@ -195,29 +244,9 @@ def copy_from_image(
         # Check if wildcards are used
         has_wildcard = has_wildcards(internal_path)
 
-        image_type = detect_image_type(image_path)
+        with open_volume(image_path, partition, readonly=True) as (volume, prefix):
+            source_display = prefix + internal_path
 
-        if image_type == 'harddisk':
-            if partition is None:
-                formatter.error("Partition number required for hard disk image (e.g., image.img:0:\\FILE)")
-                return 1
-            disk = V9KHardDiskImage(image_path, readonly=True)
-            volume = disk.get_partition(partition)
-            source_display = f"{image_path}:{partition}:\\{internal_path}"
-        elif image_type == 'ibmpc':
-            disk = IBMPCDiskImage(image_path, readonly=True)
-            volume = disk
-            source_display = f"{image_path}:\\{internal_path}"
-        elif image_type == 'cpm':
-            disk = V9KCPMDiskImage(image_path, readonly=True)
-            volume = disk
-            source_display = f"{image_path}:\\{internal_path}"
-        else:
-            disk = V9KDiskImage(image_path, readonly=True)
-            volume = disk
-            source_display = f"{image_path}:\\{internal_path}"
-
-        try:
             if has_wildcard or recursive:
                 # Multi-file copy with wildcards
                 matching_files = volume.find_matching_files(path_components, recursive)
@@ -300,8 +329,6 @@ def copy_from_image(
                     dest=str(dest),
                     bytes=len(data)
                 )
-        finally:
-            disk.close()
 
         return 0
 
@@ -321,36 +348,27 @@ def copy_to_image(
     formatter: OutputFormatter,
     recursive: bool = False
 ) -> int:
-    """Copy file or directory from filesystem to disk image.
+    """Copy file(s) or a directory from filesystem to disk image.
 
-    If the destination path ends with \\ or is an existing directory,
-    the source filename will be appended automatically.
+    The source may contain wildcards (e.g. c:\\data\\*.txt). If the
+    destination path ends with \\ or is an existing directory, source
+    filenames are appended automatically.
     """
     try:
-        source = Path(source_path)
-        if not source.exists():
-            formatter.error(f"Source not found: {source_path}")
-            return 1
-
-        image_type = detect_image_type(image_path)
-
-        if image_type == 'harddisk':
-            if partition is None:
-                formatter.error("Partition number required for hard disk image (e.g., image.img:0:\\FILE)")
+        # Expand source wildcards (the shell may not have done it)
+        if has_wildcards(source_path):
+            sources = [Path(p) for p in sorted(glob.glob(source_path)) if Path(p).is_file()]
+            if not sources:
+                formatter.error(f"No files matching: {source_path}")
                 return 1
-            disk = V9KHardDiskImage(image_path, readonly=False)
-            volume = disk.get_partition(partition)
-        elif image_type == 'ibmpc':
-            disk = IBMPCDiskImage(image_path, readonly=False)
-            volume = disk
-        elif image_type == 'cpm':
-            disk = V9KCPMDiskImage(image_path, readonly=False)
-            volume = disk
         else:
-            disk = V9KDiskImage(image_path, readonly=False)
-            volume = disk
+            source = Path(source_path)
+            if not source.exists():
+                formatter.error(f"Source not found: {source_path}")
+                return 1
+            sources = [source]
 
-        try:
+        with open_volume(image_path, partition, readonly=False) as (volume, prefix):
             # Parse the destination path
             path_components = split_internal_path(internal_path)
 
@@ -359,54 +377,45 @@ def copy_to_image(
             dest_is_dir = (
                 not internal_path or
                 internal_path.endswith('\\') or
-                internal_path.endswith('/')
+                internal_path.endswith('/') or
+                len(sources) > 1
             )
 
             # If not explicitly a directory path, check if it's an existing directory
             if not dest_is_dir and path_components:
                 try:
-                    entry = volume.find_entry(path_components)
-                    if entry and entry.is_directory:
-                        dest_is_dir = True
-                except Exception:
-                    pass  # Not found or not a directory
+                    entry = getattr(volume, 'find_entry', None)
+                    if entry is not None:
+                        found = entry(path_components)
+                        if found and found.is_directory:
+                            dest_is_dir = True
+                except V9KError:
+                    pass  # Not found — treat as a filename
 
-            # If destination is a directory, append source filename
-            if dest_is_dir:
-                # Get the source filename and convert to DOS 8.3 format
-                src_name = source.name.upper()
-                try:
-                    name, ext = validate_filename(src_name)
-                    dos_name = name.rstrip() + ('.' + ext.rstrip() if ext.rstrip() else '')
-                except Exception:
-                    # Fallback: truncate to 8.3
-                    if '.' in src_name:
-                        parts = src_name.rsplit('.', 1)
-                        dos_name = parts[0][:8] + '.' + parts[1][:3]
-                    else:
-                        dos_name = src_name[:8]
-                path_components.append(dos_name)
-
-            if not path_components:
-                formatter.error("No destination specified in image path")
+            if len(sources) > 1 and internal_path and not dest_is_dir:
+                formatter.error("Destination must be a directory when copying multiple files")
                 return 1
 
-            # Build display path
-            final_internal_path = '\\'.join(path_components)
-            if image_type == 'harddisk':
-                dest_display = f"{image_path}:{partition}:\\{final_internal_path}"
-            else:
-                dest_display = f"{image_path}:\\{final_internal_path}"
-
-            if source.is_dir():
+            single_source = sources[0]
+            if len(sources) == 1 and single_source.is_dir():
                 if not recursive:
                     formatter.error(f"'{source_path}' is a directory. Use -r for recursive copy.")
                     return 1
+                if dest_is_dir:
+                    path_components.append(_to_dos_name(single_source.name))
 
-                # Recursive directory copy
-                total_files, total_bytes = _copy_dir_to_image(
-                    source, volume, path_components, formatter
+                dest_display = prefix + '\\'.join(path_components)
+                total_files, total_bytes, failed = _copy_dir_to_image(
+                    single_source, volume, path_components, formatter
                 )
+
+                if failed:
+                    formatter.error(
+                        f"Copied {total_files} file(s), {total_bytes:,} bytes, "
+                        f"but {len(failed)} file(s) failed: "
+                        + '; '.join(f"{name}: {err}" for name, err in failed[:5])
+                    )
+                    return 1
 
                 formatter.success(
                     f"Copied {total_files} file(s), {total_bytes:,} bytes total",
@@ -416,18 +425,44 @@ def copy_to_image(
                     bytes=total_bytes
                 )
             else:
-                # Single file copy
-                data = source.read_bytes()
-                volume.write_file(path_components, data)
+                total_bytes = 0
+                copied = []
+                for src in sources:
+                    dest_components = list(path_components)
+                    if dest_is_dir:
+                        dest_components.append(_to_dos_name(src.name))
+                    if not dest_components:
+                        formatter.error("No destination specified in image path")
+                        return 1
 
-                formatter.success(
-                    f"Copied {len(data):,} bytes",
-                    source=source_path,
-                    dest=dest_display,
-                    bytes=len(data)
-                )
-        finally:
-            disk.close()
+                    data = src.read_bytes()
+                    volume.write_file(dest_components, data)
+                    total_bytes += len(data)
+                    dest_display = prefix + '\\'.join(dest_components)
+                    copied.append({
+                        "name": str(src),
+                        "size": len(data),
+                        "dest": dest_display,
+                    })
+                    if len(sources) > 1 and not formatter.json_mode:
+                        print(f"  {src} -> {dest_display} ({len(data):,} bytes)")
+
+                if len(sources) == 1:
+                    formatter.success(
+                        f"Copied {total_bytes:,} bytes",
+                        source=source_path,
+                        dest=copied[0]["dest"],
+                        bytes=total_bytes
+                    )
+                else:
+                    formatter.success(
+                        f"Copied {len(sources)} file(s), {total_bytes:,} bytes total",
+                        source=source_path,
+                        dest=prefix + internal_path,
+                        files=len(sources),
+                        bytes=total_bytes,
+                        copied=copied
+                    )
 
         return 0
 
@@ -437,6 +472,21 @@ def copy_to_image(
     except OSError as e:
         formatter.error(f"Filesystem error: {e}")
         return 1
+
+
+def _to_dos_name(filename: str) -> str:
+    """Convert a filesystem name to DOS 8.3 (uppercase, truncated)."""
+    src_name = filename.upper()
+    try:
+        name, ext = validate_filename(src_name)
+        return name.rstrip() + ('.' + ext.rstrip() if ext.rstrip() else '')
+    except V9KError:
+        # Fallback: truncate to 8.3, dropping interior dots
+        if '.' in src_name:
+            name_part, ext_part = src_name.rsplit('.', 1)
+            name_part = name_part.replace('.', '')
+            return name_part[:8] + ('.' + ext_part[:3] if ext_part else '')
+        return src_name[:8]
 
 
 def _copy_dir_to_image(
@@ -455,33 +505,36 @@ def _copy_dir_to_image(
         formatter: Output formatter
 
     Returns:
-        (total_files, total_bytes) copied
+        (total_files, total_bytes, failed) where failed is a list of
+        (source_name, error_message) for files that could not be copied
     """
     total_files = 0
     total_bytes = 0
+    failed: list[tuple[str, str]] = []
 
     # Create the destination directory
     volume.create_directory(dest_path_components)
 
     # Iterate through source directory
+    used_names: dict[str, str] = {}
     for item in source_dir.iterdir():
-        # Convert filename to DOS 8.3 format (uppercase, truncate if needed)
-        dos_name = item.name.upper()
-        if len(dos_name) > 12:  # Max 8.3 = 12 chars with dot
-            # Truncate name
-            if '.' in dos_name:
-                name_part, ext_part = dos_name.rsplit('.', 1)
-                dos_name = name_part[:8] + '.' + ext_part[:3]
-            else:
-                dos_name = dos_name[:8]
+        dos_name = _to_dos_name(item.name)
+
+        # Two long names can truncate to the same 8.3 name — don't silently
+        # overwrite the earlier file
+        if dos_name in used_names:
+            failed.append((str(item), f"8.3 name '{dos_name}' collides with {used_names[dos_name]}"))
+            continue
+        used_names[dos_name] = item.name
 
         item_dest = dest_path_components + [dos_name]
 
         if item.is_dir():
             # Recurse into subdirectory
-            sub_files, sub_bytes = _copy_dir_to_image(item, volume, item_dest, formatter)
+            sub_files, sub_bytes, sub_failed = _copy_dir_to_image(item, volume, item_dest, formatter)
             total_files += sub_files
             total_bytes += sub_bytes
+            failed.extend(sub_failed)
         elif item.is_file():
             # Copy file
             try:
@@ -493,11 +546,12 @@ def _copy_dir_to_image(
                 if not formatter.json_mode:
                     dest_str = '\\'.join(item_dest)
                     print(f"  {item} -> {dest_str} ({len(data):,} bytes)")
-            except Exception as e:
+            except (V9KError, OSError) as e:
+                failed.append((str(item), str(e)))
                 if not formatter.json_mode:
                     print(f"  Warning: Failed to copy {item}: {e}")
 
-    return total_files, total_bytes
+    return total_files, total_bytes, failed
 
 
 def cmd_delete(args, formatter: OutputFormatter) -> int:
@@ -516,37 +570,19 @@ def cmd_delete(args, formatter: OutputFormatter) -> int:
             formatter.error("No file or directory specified to delete")
             return 1
 
-        image_type = detect_image_type(image_path)
+        with open_volume(image_path, partition, readonly=False) as (volume, prefix):
+            delete_display = prefix + internal_path
 
-        if image_type == 'harddisk':
-            if partition is None:
-                formatter.error("Partition number required for hard disk image (e.g., image.img:0:\\FILE)")
-                return 1
-            disk = V9KHardDiskImage(image_path, readonly=False)
-            volume = disk.get_partition(partition)
-            delete_display = f"{image_path}:{partition}:\\{internal_path}"
-        elif image_type == 'ibmpc':
-            disk = IBMPCDiskImage(image_path, readonly=False)
-            volume = disk
-            delete_display = f"{image_path}:\\{internal_path}"
-        elif image_type == 'cpm':
-            disk = V9KCPMDiskImage(image_path, readonly=False)
-            volume = disk
-            delete_display = f"{image_path}:\\{internal_path}"
-        else:
-            disk = V9KDiskImage(image_path, readonly=False)
-            volume = disk
-            delete_display = f"{image_path}:\\{internal_path}"
-
-        try:
-            # Check if it's a directory
+            # Check if it's a directory (CP/M has no directories or find_entry)
             is_directory = False
-            try:
-                entry = volume.find_entry(path_components)
-                if entry and entry.is_directory:
-                    is_directory = True
-            except Exception:
-                pass
+            finder = getattr(volume, 'find_entry', None)
+            if finder is not None:
+                try:
+                    entry = finder(path_components)
+                    if entry and entry.is_directory:
+                        is_directory = True
+                except V9KFileNotFoundError:
+                    pass  # Let delete_file report the missing file
 
             if is_directory:
                 # Delete directory
@@ -562,8 +598,6 @@ def cmd_delete(args, formatter: OutputFormatter) -> int:
                     f"Deleted {internal_path}",
                     deleted=delete_display
                 )
-        finally:
-            disk.close()
 
         return 0
 
@@ -682,6 +716,10 @@ def cmd_create(args, formatter: OutputFormatter) -> int:
     try:
         disk_type = args.type
         label = getattr(args, 'label', None)
+
+        if label is not None and not label.isascii():
+            formatter.error(f"Volume label must be ASCII: {label}")
+            return 1
 
         if disk_type == 'victor-ss':
             create_victor_floppy(output_path, sides='single', volume_label=label)
@@ -805,23 +843,9 @@ def cmd_attr(args, formatter: OutputFormatter) -> int:
         # Open disk in appropriate mode
         readonly = not has_mods
 
-        if image_type == 'harddisk':
-            if partition is None:
-                formatter.error("Partition number required for hard disk (e.g., image.img:0:\\FILE)")
-                return 1
-            disk = V9KHardDiskImage(image_path, readonly=readonly)
-            volume = disk.get_partition(partition)
-            display_path = f"{image_path}:{partition}:\\{internal_path}"
-        elif image_type == 'ibmpc':
-            disk = IBMPCDiskImage(image_path, readonly=readonly)
-            volume = disk
-            display_path = f"{image_path}:\\{internal_path}"
-        else:
-            disk = V9KDiskImage(image_path, readonly=readonly)
-            volume = disk
-            display_path = f"{image_path}:\\{internal_path}"
+        with open_volume(image_path, partition, readonly=readonly) as (volume, prefix):
+            display_path = prefix + internal_path
 
-        try:
             # Get current attributes
             current_attrs = volume.get_attributes(path_components)
 
@@ -858,9 +882,6 @@ def cmd_attr(args, formatter: OutputFormatter) -> int:
                     )
                 else:
                     print(f"{internal_path}: {attr_str}")
-
-        finally:
-            disk.close()
 
         return 0
 
@@ -934,9 +955,9 @@ using FAT12 and CP/M filesystems.
 
 Supported disk types:
     - Victor 9000 floppy disks (single and double-sided)
-    - Victor 9000 hard disk images (multi-partition)
+    - Victor 9000 hard disk images (multi-partition, raw .img or CHD)
     - IBM PC floppy disks (360K, 720K, 1.2M, 1.44M)
-    - Victor 9000 CP/M-86 floppy disks (read-only)
+    - Victor 9000 CP/M-86 floppy disks (read and write)
 
 PATH SYNTAX
 -----------
@@ -1107,14 +1128,15 @@ WILDCARDS
 ---------
 The copy command supports DOS-style wildcards:
     *       Matches any characters (including none)
-    ?       Matches exactly one character
+    ?       Matches one character (at the end of the name or extension
+            it may also match nothing, as in DOS)
 
 Examples:
     *.COM       All .COM files
     *.          All files without extension
-    *.*         All files with extensions
+    *.*         All files (with or without extension, as in DOS)
     *           All files (with or without extension)
-    FILE?.TXT   FILE1.TXT, FILE2.TXT, etc.
+    FILE?.TXT   FILE.TXT, FILE1.TXT, FILE2.TXT, etc.
 
 FILENAME FORMAT
 ---------------
@@ -1127,8 +1149,9 @@ Victor 9000 uses standard 8.3 DOS filenames:
 JSON OUTPUT
 -----------
 Use --json for machine-readable output. All commands support JSON mode.
-Errors are returned as: {"error": "message"}
-Success includes relevant data fields depending on the command.
+Errors are returned as: {"status": "error", "message": "..."}
+Success is returned as: {"status": "success", ...} with data fields
+depending on the command.
 
 Example:
     vtg_image_util list disk.img --json | jq '.files[].name'
@@ -1212,23 +1235,19 @@ def cmd_mkdir(args, formatter: OutputFormatter) -> int:
             formatter.error("CP/M disks do not support subdirectories")
             return 1
 
-        if image_type == 'harddisk':
-            if partition is None:
-                formatter.error("Partition number required for hard disk (e.g., image.img:0:\\DIRNAME)")
-                return 1
-            disk = V9KHardDiskImage(image_path, readonly=False)
-            volume = disk.get_partition(partition)
-            display_path = f"{image_path}:{partition}:\\{internal_path}"
-        elif image_type == 'ibmpc':
-            disk = IBMPCDiskImage(image_path, readonly=False)
-            volume = disk
-            display_path = f"{image_path}:\\{internal_path}"
-        else:
-            disk = V9KDiskImage(image_path, readonly=False)
-            volume = disk
-            display_path = f"{image_path}:\\{internal_path}"
+        with open_volume(image_path, partition, readonly=False) as (volume, prefix):
+            display_path = prefix + internal_path
 
-        try:
+            # create_directory is a silent no-op for an existing directory;
+            # report that honestly instead of claiming creation
+            try:
+                existing = volume.find_entry(path_components)
+            except V9KFileNotFoundError:
+                existing = None
+            if existing is not None and existing.is_directory:
+                formatter.error(f"Directory already exists: {internal_path}")
+                return 1
+
             volume.create_directory(path_components)
             volume.flush()
 
@@ -1236,8 +1255,6 @@ def cmd_mkdir(args, formatter: OutputFormatter) -> int:
                 f"Created directory {internal_path}",
                 directory=display_path
             )
-        finally:
-            disk.close()
 
         return 0
 
@@ -1274,23 +1291,9 @@ def cmd_rmdir(args, formatter: OutputFormatter) -> int:
             formatter.error("CP/M disks do not support subdirectories")
             return 1
 
-        if image_type == 'harddisk':
-            if partition is None:
-                formatter.error("Partition number required for hard disk (e.g., image.img:0:\\DIRNAME)")
-                return 1
-            disk = V9KHardDiskImage(image_path, readonly=False)
-            volume = disk.get_partition(partition)
-            display_path = f"{image_path}:{partition}:\\{internal_path}"
-        elif image_type == 'ibmpc':
-            disk = IBMPCDiskImage(image_path, readonly=False)
-            volume = disk
-            display_path = f"{image_path}:\\{internal_path}"
-        else:
-            disk = V9KDiskImage(image_path, readonly=False)
-            volume = disk
-            display_path = f"{image_path}:\\{internal_path}"
+        with open_volume(image_path, partition, readonly=False) as (volume, prefix):
+            display_path = prefix + internal_path
 
-        try:
             volume.delete_directory(path_components, recursive=recursive)
             volume.flush()
 
@@ -1298,8 +1301,6 @@ def cmd_rmdir(args, formatter: OutputFormatter) -> int:
                 f"Removed directory {internal_path}",
                 directory=display_path
             )
-        finally:
-            disk.close()
 
         return 0
 

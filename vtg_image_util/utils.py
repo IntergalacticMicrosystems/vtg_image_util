@@ -77,64 +77,64 @@ def parse_image_path(path_spec: str) -> tuple[str | None, int | None, str | None
     """
     lower = path_spec.lower()
 
-    # Find image file extensions (including CHD container format)
+    # Find the split point: an image extension only counts when followed by
+    # ':' or the end of the string, so directories like 'my.imgs\' or files
+    # like 'backup.img.bak' are not mistaken for disk images.
+    split_pos = None
     for ext in ['.img', '.ima', '.dsk', '.chd']:
-        idx = lower.find(ext)
-        if idx != -1:
-            split_pos = idx + len(ext)
-            image_path = path_spec[:split_pos]
-            remainder = path_spec[split_pos:]
+        search_from = 0
+        while True:
+            idx = lower.find(ext, search_from)
+            if idx == -1:
+                break
+            end = idx + len(ext)
+            if end == len(path_spec) or path_spec[end] == ':':
+                if split_pos is None or end < split_pos:
+                    split_pos = end
+                break
+            search_from = idx + 1
 
-            if not remainder:
-                # Just the image path (e.g., 'disk.img')
-                return (image_path, None, None)
+    if split_pos is None:
+        # Regular filesystem path (no recognized image extension)
+        return (None, None, path_spec)
 
-            if remainder.startswith(':'):
-                remainder = remainder[1:]  # Skip first colon
+    image_path = path_spec[:split_pos]
+    remainder = path_spec[split_pos:]
 
-                if not remainder:
-                    # Just 'disk.img:'
-                    return (image_path, None, None)
+    if not remainder or remainder == ':':
+        # Just the image path (e.g., 'disk.img' or 'disk.img:')
+        return (image_path, None, None)
 
-                # Check if next part is a partition number
-                if remainder[0].isdigit():
-                    # Find where partition number ends
-                    num_end = 0
-                    while num_end < len(remainder) and remainder[num_end].isdigit():
-                        num_end += 1
-                    partition = int(remainder[:num_end])
-                    after_num = remainder[num_end:]
+    remainder = remainder[1:]  # Skip the colon
 
-                    if not after_num:
-                        # 'hd.img:0'
-                        return (image_path, partition, None)
-                    elif after_num.startswith(':'):
-                        # 'hd.img:0:' or 'hd.img:0:\path'
-                        after_colon = after_num[1:]
-                        if not after_colon:
-                            return (image_path, partition, None)
-                        elif after_colon.startswith('\\') or after_colon.startswith('/'):
-                            return (image_path, partition, after_colon[1:] if after_colon else None)
-                        else:
-                            return (image_path, partition, after_colon)
-                    elif after_num.startswith('\\') or after_num.startswith('/'):
-                        # 'hd.img:0\path' - partition with backslash
-                        return (image_path, partition, after_num[1:] if len(after_num) > 1 else None)
-                    else:
-                        # Invalid format
-                        return (None, None, path_spec)
+    # A leading run of digits is a partition number only when followed by
+    # ':' , '\', '/' or the end — 'disk.img:123.TXT' is a filename.
+    if remainder[0].isdigit():
+        num_end = 0
+        while num_end < len(remainder) and remainder[num_end].isdigit():
+            num_end += 1
+        after_num = remainder[num_end:]
 
-                # No partition number - floppy format
-                if remainder.startswith('\\') or remainder.startswith('/'):
-                    return (image_path, None, remainder[1:] if len(remainder) > 1 else None)
-                else:
-                    return (image_path, None, remainder)
+        if not after_num:
+            # 'hd.img:0'
+            return (image_path, int(remainder[:num_end]), None)
+        if after_num.startswith(':'):
+            # 'hd.img:0:' or 'hd.img:0:\path' — root is '' (not None)
+            partition = int(remainder[:num_end])
+            after_colon = after_num[1:]
+            if not after_colon:
+                return (image_path, partition, None)
+            return (image_path, partition, after_colon.lstrip('\\/'))
+        if after_num.startswith('\\') or after_num.startswith('/'):
+            # 'hd.img:0\path'
+            partition = int(remainder[:num_end])
+            return (image_path, partition, after_num.lstrip('\\/'))
+        # Digits followed by something else: a filename like '123.TXT'
 
-            # Extension found but no colon after - just image path
-            return (image_path, None, None)
-
-    # Regular filesystem path (no recognized image extension)
-    return (None, None, path_spec)
+    # No partition number — floppy format. 'disk.img:\' means root ('').
+    if remainder.startswith('\\') or remainder.startswith('/'):
+        return (image_path, None, remainder.lstrip('\\/'))
+    return (image_path, None, remainder)
 
 
 def detect_image_type(image_path: str) -> str:
@@ -288,31 +288,54 @@ def has_wildcards(pattern: str) -> bool:
     return '*' in pattern or '?' in pattern
 
 
-def match_filename(pattern: str, filename: str) -> bool:
+def _wildcard_segment_regex(segment: str, any_char: str) -> str:
     """
-    Match a DOS-style wildcard pattern against a filename.
-    Supports * (any characters) and ? (single character).
+    Convert one pattern segment (name or extension) to a regex fragment.
+    '?' matches a single character but, like DOS, may also match nothing
+    at the end of the segment.
     """
-    pattern = pattern.upper()
-    filename = filename.upper()
-
-    # Convert DOS wildcard pattern to regex
-    # * matches any characters, ? matches single character
     regex = ''
-    for char in pattern:
+    trailing_q = len(segment) - len(segment.rstrip('?'))
+    body = segment[:len(segment) - trailing_q]
+    for char in body:
         if char == '*':
-            regex += '.*'
+            regex += any_char + '*'
         elif char == '?':
-            regex += '.'
+            regex += any_char
         elif char in '.^$+{}[]|()\\':
             regex += '\\' + char
         else:
             regex += char
+    regex += (any_char + '?') * trailing_q
+    return regex
 
-    # Anchor the pattern
-    regex = '^' + regex + '$'
 
-    return bool(re.match(regex, filename))
+def match_filename(pattern: str, filename: str) -> bool:
+    """
+    Match a DOS-style wildcard pattern against a filename.
+    Supports * (any characters) and ? (single character; at the end of the
+    name or extension it may also match nothing, as in DOS). Like DOS,
+    '*.*' matches every file, including those without an extension.
+    """
+    pattern = pattern.upper()
+    filename = filename.upper()
+
+    if '.' in pattern:
+        # Match name and extension separately (8.3 patterns have one dot)
+        name_pat, ext_pat = pattern.rsplit('.', 1)
+        regex = _wildcard_segment_regex(name_pat, '[^.]')
+        if ext_pat == '':
+            # 'NAME.' matches files WITHOUT an extension, as in DOS
+            pass
+        elif ext_pat == '*' or ext_pat == '?' * len(ext_pat):
+            # '*.*' / 'NAME.*' also match files without an extension
+            regex += '(\\.' + _wildcard_segment_regex(ext_pat, '[^.]') + ')?'
+        else:
+            regex += '\\.' + _wildcard_segment_regex(ext_pat, '[^.]')
+    else:
+        regex = _wildcard_segment_regex(pattern, '.')
+
+    return bool(re.match('^' + regex + '$', filename))
 
 
 def match_entries(entries: list[DirectoryEntry], pattern: str) -> list[DirectoryEntry]:
