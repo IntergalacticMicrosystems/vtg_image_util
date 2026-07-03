@@ -6,8 +6,8 @@ A cross-platform utility for reading and writing Victor 9000 and IBM PC floppy a
 
 - **Victor 9000 Support**
   - FAT12 floppy disks (single and double-sided)
-  - Hard disk images with multiple partitions
-  - CP/M-86 floppy disks (read-only)
+  - Hard disk images with multiple partitions (raw .img and CHD)
+  - CP/M-86 floppy disks (read and write)
 
 - **IBM PC Support**
   - FAT12 floppy disks (360KB, 720KB, 1.2MB, 1.44MB)
@@ -240,11 +240,15 @@ image.img:1:\SUBDIR        Subdirectory in partition 1
 ```
 
 ### Wildcards
+
+DOS-style semantics:
 ```
 *        Matches any characters (including none)
-?        Matches exactly one character
+?        Matches one character (at the end of the name or
+         extension it may also match nothing, as in DOS)
 *.COM    All .COM files
-*.*      All files with extensions
+*.*      All files (with or without extension, as in DOS)
+*.       All files without an extension
 *        All files (with or without extension)
 ```
 
@@ -316,8 +320,10 @@ For distribution, consider creating an AppImage or packaging for your distributi
 ### Victor 9000 Floppy Format
 - FAT12 filesystem
 - 4 sectors per cluster (2048 bytes)
-- Single-sided: ~600KB, Double-sided: ~1.2MB
+- Single-sided: ~600KB (303 clusters), Double-sided: ~1.2MB (594 clusters)
 - Variable track geometry (GCR encoding on real hardware)
+- Sector writes are bounds-checked so the image can never grow past
+  the media size
 
 ### Victor 9000 Hard Disk Format
 - Physical disk label at sector 0
@@ -329,12 +335,22 @@ For distribution, consider creating an AppImage or packaging for your distributi
   - IPL at the start of the data area, covered by an allocated FAT chain —
     the FAT itself protects it, and the full cluster count remains usable
   - IPL in otherwise-free space at the end of the data area — the usable
-    cluster count is clamped so file allocation never reaches it
+    (allocatable) cluster count is clamped so file allocation never
+    reaches it, while the full range stays readable for existing files
 
 ### IBM PC Floppy Format
 - Standard FAT12 with BIOS Parameter Block
 - Boot signature 0x55AA identifies format
 - Geometry read from BPB fields
+
+### CHD Container Format (read-only)
+- MAME CHD v5, identified by the `MComprHD` signature
+- Uncompressed and compressed CHDs are fully supported, including the
+  Huffman-encoded v5 hunk map and the zlib, lzma, huff, and flac codecs
+- The hunk map checksum and per-hunk CRCs are verified on read, so
+  corrupt CHD data is reported instead of silently returned
+- Parent (delta) CHDs are not supported — convert with
+  `chdman extractraw -i input.chd -o output.img`
 
 ### Image Type Detection
 - File size > 2MB with valid label: Victor hard disk
