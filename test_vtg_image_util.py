@@ -824,6 +824,35 @@ class TestHardDiskOperations:
             data = partition.read_file([file_entry.full_name])
             assert len(data) == file_entry.file_size
 
+    def test_ipl_at_end_clamps_clusters(self, hard_disk_readonly):
+        """IPL in free space at end of data area limits usable clusters.
+
+        vichd.img partition 0 has its IPL at relative sector 18583 with the
+        covering clusters left free in the FAT, so total_clusters must be
+        clamped (290 instead of 312) to protect the boot code.
+        """
+        partition = hard_disk_readonly.get_partition(0)
+        assert partition.total_clusters == 290
+
+    def test_ipl_at_start_keeps_full_capacity(self):
+        """IPL protected by an allocated FAT chain does not shrink the volume.
+
+        vidhc_paul.img partition 0 has its IPL at the start of the data area
+        (relative sector 66, immediately after the metadata), covered by an
+        allocated cluster chain. The old end-of-disk clamp computed 0 usable
+        clusters, making the volume report 0 capacity and 0 free space.
+        """
+        img_path = EXAMPLE_DISKS_DIR / "vidhc_paul.img"
+        with V9KHardDiskImage(str(img_path), readonly=True) as disk:
+            partition = disk.get_partition(0)
+            assert partition.total_clusters == 1245
+            # The IPL chain occupies clusters 2-11; the rest must be countable
+            free = sum(
+                1 for c in range(2, partition.total_clusters + 2)
+                if partition.get_fat_entry(c) == 0x000
+            )
+            assert free > 1200
+
 
 class TestImageTypeDetection:
     """Test automatic image type detection."""

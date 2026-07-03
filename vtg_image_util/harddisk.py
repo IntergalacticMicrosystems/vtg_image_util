@@ -8,6 +8,7 @@ from typing import BinaryIO, Protocol
 
 from .constants import (
     DIR_ENTRY_SIZE,
+    FAT_FREE,
     HD_MAX_DIR_ENTRIES,
     HD_SECTORS_PER_CLUSTER,
     SECTOR_SIZE,
@@ -70,24 +71,34 @@ class V9KPartition(FAT12Base):
         volume_data_sectors = volume_label.volume_capacity - (1 + 2 * self._fat_sectors + self._dir_sectors)
         self._total_clusters = volume_data_sectors // self._sectors_per_cluster
 
-        # CRITICAL: Check for IPL (boot code) area that must not be overwritten
-        # The IPL address is relative to volume start, and resides at the end of
-        # the partition's data area. We must limit cluster allocation to avoid it.
-        if volume_label.ipl_disk_address > 0 and volume_label.ipl_load_length > 0:
-            # IPL start sector (relative to volume start)
-            ipl_start_relative = volume_label.ipl_disk_address
-            # Calculate the maximum usable data sectors (before IPL starts)
-            # data_start is at offset (1 + 2*fat_sectors + dir_sectors) from volume start
-            metadata_sectors = 1 + 2 * self._fat_sectors + self._dir_sectors
-            usable_data_sectors = ipl_start_relative - metadata_sectors
-            # Limit total clusters to fit within usable area
-            max_safe_clusters = usable_data_sectors // self._sectors_per_cluster
-            if max_safe_clusters < self._total_clusters:
-                self._total_clusters = max_safe_clusters
-
         # Initialize base class and load FAT
         FAT12Base.__init__(self)
         self._load_fat()
+
+        # CRITICAL: Protect the IPL (boot code) area from being overwritten.
+        # The IPL address is relative to volume start. Two layouts exist:
+        # - IPL at the start of the data area with its clusters already marked
+        #   as an allocated chain in the FAT — the FAT protects it, and the
+        #   full cluster count remains usable.
+        # - IPL in otherwise-free space near the end of the data area — clamp
+        #   total_clusters so allocation never reaches it.
+        if volume_label.ipl_disk_address > 0 and volume_label.ipl_load_length > 0:
+            metadata_sectors = 1 + 2 * self._fat_sectors + self._dir_sectors
+            ipl_start = volume_label.ipl_disk_address  # relative to volume start
+            ipl_sectors = (volume_label.ipl_load_length + SECTOR_SIZE - 1) // SECTOR_SIZE
+            ipl_end = ipl_start + ipl_sectors - 1
+            if ipl_end >= metadata_sectors:
+                first_cluster = 2 + max(0, ipl_start - metadata_sectors) // self._sectors_per_cluster
+                last_cluster = 2 + (ipl_end - metadata_sectors) // self._sectors_per_cluster
+                last_cluster = min(last_cluster, self._total_clusters + 1)
+                if any(self.get_fat_entry(c) == FAT_FREE
+                       for c in range(first_cluster, last_cluster + 1)):
+                    # IPL clusters are not allocated in the FAT, so limit the
+                    # usable cluster range to end before the IPL.
+                    usable_data_sectors = max(0, ipl_start - metadata_sectors)
+                    max_safe_clusters = usable_data_sectors // self._sectors_per_cluster
+                    if max_safe_clusters < self._total_clusters:
+                        self._total_clusters = max_safe_clusters
 
     # =========================================================================
     # Layout Detection

@@ -324,6 +324,12 @@ For distribution, consider creating an AppImage or packaging for your distributi
 - Multiple partitions (virtual volumes)
 - Variable cluster size (typically 32KB)
 - Each partition has independent FAT and directory
+- Boot partitions store an IPL (boot code) image in the data area. Two
+  layouts exist in practice, and both are protected from being overwritten:
+  - IPL at the start of the data area, covered by an allocated FAT chain —
+    the FAT itself protects it, and the full cluster count remains usable
+  - IPL in otherwise-free space at the end of the data area — the usable
+    cluster count is clamped so file allocation never reaches it
 
 ### IBM PC Floppy Format
 - Standard FAT12 with BIOS Parameter Block
