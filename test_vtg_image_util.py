@@ -434,11 +434,11 @@ class TestWildcardMatching:
         assert not has_wildcards("COMMAND.COM")
 
     def test_star_dot_star(self):
-        """Test *.* pattern matching."""
+        """Test *.* pattern matching (DOS semantics: matches every file)."""
         assert match_filename("*.*", "FILE.TXT")
         assert match_filename("*.*", "A.B")
         assert match_filename("*.*", "LONGNAME.COM")
-        assert not match_filename("*.*", "README")  # No extension
+        assert match_filename("*.*", "README")  # DOS: *.* also matches no-extension
 
     def test_star_only(self):
         """Test * pattern matching (all files)."""
@@ -446,6 +446,11 @@ class TestWildcardMatching:
         assert match_filename("*", "README")
         assert match_filename("*", "COMMAND.COM")
         assert match_filename("*", "A")
+
+    def test_star_dot(self):
+        """Test *. pattern (files without an extension, as in DOS)."""
+        assert match_filename("*.", "README")
+        assert not match_filename("*.", "FILE.TXT")
 
     def test_pattern_match(self):
         """Test specific patterns."""
@@ -461,7 +466,9 @@ class TestWildcardMatching:
         """Test ? single character wildcard."""
         assert match_filename("FILE?.TXT", "FILE1.TXT")
         assert match_filename("FILE?.TXT", "FILEA.TXT")
-        assert not match_filename("FILE?.TXT", "FILE.TXT")
+        # DOS: a trailing ? may also match nothing
+        assert match_filename("FILE?.TXT", "FILE.TXT")
+        assert not match_filename("FIL?E.TXT", "FILE.TXT")
         assert not match_filename("FILE?.TXT", "FILE12.TXT")
 
     def test_no_match(self):
@@ -618,6 +625,11 @@ class TestFloppyDiskOperations:
         if not ref_file.exists():
             pytest.skip("Reference file not available")
 
+        entry = floppy_image_readonly.find_entry(["COMMAND.COM"])
+        if entry.file_size != ref_file.stat().st_size:
+            pytest.skip("disk.img fixture does not match the reference files "
+                        "(different COMMAND.COM version)")
+
         data = floppy_image_readonly.read_file(["COMMAND.COM"])
 
         assert data == ref_file.read_bytes()
@@ -641,13 +653,26 @@ class TestFloppyDiskOperations:
         """Read multiple files and verify against references."""
         test_files = ["COMMAND.COM", "MSDOS.SYS", "CONFIG.SYS"]
 
+        verified = 0
         for filename in test_files:
             ref_path = REFERENCE_FILES_DIR / filename
             if not ref_path.exists():
                 continue
 
+            # Skip files that clearly come from a different disk revision
+            try:
+                entry = floppy_image_readonly.find_entry([filename])
+            except V9KFileNotFoundError:
+                continue
+            if entry.file_size != ref_path.stat().st_size:
+                continue
+
             data = floppy_image_readonly.read_file([filename])
             assert data == ref_path.read_bytes(), f"Mismatch in {filename}"
+            verified += 1
+
+        if verified == 0:
+            pytest.skip("disk.img fixture does not match the reference files")
 
     def test_write_new_file_small(self, blank_ds_copy, temp_dir):
         """Write a small file (less than one cluster)."""
@@ -736,12 +761,24 @@ class TestFloppyDiskOperations:
             assert disk._dir_start == 3
             assert disk._data_start == 11
 
-    def test_double_sided_geometry(self, floppy_image_readonly):
-        """Verify double-sided disk geometry."""
-        assert floppy_image_readonly._double_sided
-        assert floppy_image_readonly._fat_sectors == 2
-        assert floppy_image_readonly._dir_start == 5
-        assert floppy_image_readonly._data_start == 13
+    def test_double_sided_geometry(self):
+        """Verify double-sided disk geometry (using the blank DS image)."""
+        with V9KDiskImage(str(BLANK_DS_IMG), readonly=True) as disk:
+            assert disk._double_sided
+            assert disk._fat_sectors == 2
+            assert disk._dir_start == 5
+            assert disk._data_start == 13
+
+    def test_cluster_counts_match_media(self):
+        """total_clusters must be data sectors / 4, not the sector count."""
+        with V9KDiskImage(str(BLANK_SS_IMG), readonly=True) as disk:
+            expected = (os.path.getsize(BLANK_SS_IMG) // SECTOR_SIZE - disk.data_start) // 4
+            assert disk.total_clusters == expected
+            assert disk.total_clusters < 400  # ~303, not 1214
+        with V9KDiskImage(str(BLANK_DS_IMG), readonly=True) as disk:
+            expected = (os.path.getsize(BLANK_DS_IMG) // SECTOR_SIZE - disk.data_start) // 4
+            assert disk.total_clusters == expected
+            assert disk.total_clusters < 700  # ~594, not 2378
 
 
 class TestFloppyWildcardCopy:
@@ -828,11 +865,13 @@ class TestHardDiskOperations:
         """IPL in free space at end of data area limits usable clusters.
 
         vichd.img partition 0 has its IPL at relative sector 18583 with the
-        covering clusters left free in the FAT, so total_clusters must be
-        clamped (290 instead of 312) to protect the boot code.
+        covering clusters left free in the FAT, so usable_clusters must be
+        clamped (290 instead of 312) to protect the boot code, while the
+        full range stays addressable for reading existing files.
         """
         partition = hard_disk_readonly.get_partition(0)
-        assert partition.total_clusters == 290
+        assert partition.total_clusters == 312
+        assert partition.usable_clusters == 290
 
     def test_ipl_at_start_keeps_full_capacity(self):
         """IPL protected by an allocated FAT chain does not shrink the volume.
@@ -1107,6 +1146,156 @@ class TestContextManagers:
         with V9KHardDiskImage(str(HARD_DISK_IMG), readonly=True) as disk:
             partitions = disk.list_partitions()
             assert len(partitions) > 0
+
+
+# =============================================================================
+# Regression Tests (bugs fixed July 2026)
+# =============================================================================
+
+CPM_DISK_IMG = EXAMPLE_DISKS_DIR / "CPM86" / "122" / "disk.img"
+CHD_IMG = EXAMPLE_DISKS_DIR / "vichd.chd"
+
+
+class TestDiskBoundaryRegressions:
+    """Writes must never extend the image or corrupt data past the media."""
+
+    def test_disk_full_raises_and_image_size_unchanged(self, blank_ds_copy):
+        """Filling a floppy must end in DiskFullError, never grow the file."""
+        original_size = os.path.getsize(blank_ds_copy)
+        data = bytes(CLUSTER_SIZE * 50)
+
+        with V9KDiskImage(str(blank_ds_copy), readonly=False) as disk:
+            with pytest.raises(DiskFullError):
+                for i in range(1000):
+                    disk.write_file([f"F{i:03d}.BIN"], data)
+
+        assert os.path.getsize(blank_ds_copy) == original_size
+
+    def test_write_sector_out_of_range_raises(self, blank_ds_copy):
+        """Direct sector writes past the image must be rejected."""
+        with V9KDiskImage(str(blank_ds_copy), readonly=False) as disk:
+            with pytest.raises(DiskError):
+                disk.write_sector(10_000_000, bytes(SECTOR_SIZE))
+
+    def test_get_fat_entry_out_of_range_raises(self, blank_ds_copy):
+        """FAT reads outside the FAT must raise, not report 'free'."""
+        with V9KDiskImage(str(blank_ds_copy), readonly=True) as disk:
+            with pytest.raises(CorruptedDiskError):
+                disk.get_fat_entry(100_000)
+
+    def test_overwrite_failure_preserves_original(self, blank_ss_copy):
+        """A failed overwrite (disk full) must not destroy the old file."""
+        original = b"A" * 10000
+        with V9KDiskImage(str(blank_ss_copy), readonly=False) as disk:
+            disk.write_file(["KEEP.DAT"], original)
+            free = sum(1 for c in range(2, disk.usable_clusters + 2)
+                       if disk.get_fat_entry(c) == FAT_FREE)
+            disk.write_file(["FILL.DAT"], bytes(CLUSTER_SIZE * (free - 1)))
+
+            with pytest.raises(DiskFullError):
+                disk.write_file(["KEEP.DAT"], b"B" * 500_000)
+
+            assert disk.read_file(["KEEP.DAT"]) == original
+
+        # Also intact after reopen (nothing bad was flushed)
+        with V9KDiskImage(str(blank_ss_copy), readonly=True) as disk:
+            assert disk.read_file(["KEEP.DAT"]) == original
+
+
+class TestCPMWriteRegressions:
+    """CP/M write path must not treat user-0 files as free slots."""
+
+    @pytest.fixture
+    def cpm_copy(self, temp_dir):
+        if not CPM_DISK_IMG.exists():
+            pytest.skip("CP/M example disk not available")
+        copy_path = temp_dir / "cpm_copy.img"
+        shutil.copy(CPM_DISK_IMG, copy_path)
+        return copy_path
+
+    def test_write_does_not_destroy_user0_files(self, cpm_copy):
+        from vtg_image_util.cpm import V9KCPMDiskImage
+
+        with V9KCPMDiskImage(str(cpm_copy), readonly=False) as disk:
+            before = {(f.user, f.full_name) for f in disk.list_files()}
+            assert before, "fixture disk should contain files"
+
+            disk.write_file(["NEWFILE.BIN"], bytes(range(256)) * 40)
+
+            after = {(f.user, f.full_name) for f in disk.list_files()}
+            assert before <= after, "existing directory entries were destroyed"
+            assert disk.read_file(["NEWFILE.BIN"])[:10240] == bytes(range(256)) * 40
+
+    def test_delete_user0_file(self, cpm_copy):
+        from vtg_image_util.cpm import V9KCPMDiskImage
+
+        with V9KCPMDiskImage(str(cpm_copy), readonly=False) as disk:
+            disk.write_file(["DELME.TXT"], b"x" * 100)
+            disk.delete_file(["DELME.TXT"])
+            assert disk.find_file("DELME.TXT") is None
+
+    def test_block_allocator_respects_media_size(self, cpm_copy):
+        from vtg_image_util.cpm import V9KCPMDiskImage
+
+        with V9KCPMDiskImage(str(cpm_copy), readonly=False) as disk:
+            # 1224-sector SS media: only (1224-112)/4 = 278 blocks exist
+            assert disk._max_blocks <= 278
+            # Block 0 means "unused pointer" and must never be allocated
+            assert 0 not in disk._free_block_numbers()
+
+
+class TestCHDRegression:
+    """Compressed CHD decoding must be bit-exact."""
+
+    def test_chd_decodes_identically_to_raw(self):
+        if not CHD_IMG.exists() or not HARD_DISK_IMG.exists():
+            pytest.skip("CHD/raw example pair not available")
+
+        from vtg_image_util.chd import CHDFile
+
+        with CHDFile(str(CHD_IMG)) as chd:
+            decoded = chd.read()
+        raw = HARD_DISK_IMG.read_bytes()
+        assert decoded == raw
+
+
+class TestPathParsingRegressions:
+    """parse_image_path edge cases."""
+
+    def test_root_path_is_empty_string(self):
+        assert parse_image_path("disk.img:\\") == ("disk.img", None, "")
+        assert parse_image_path("hd.img:0:\\") == ("hd.img", 0, "")
+
+    def test_infix_image_extension_in_directory_name(self):
+        image, part, internal = parse_image_path("C:\\my.imgs\\disk.img:\\F.TXT")
+        assert image == "C:\\my.imgs\\disk.img"
+        assert internal == "F.TXT"
+
+    def test_image_extension_not_at_boundary_is_filesystem_path(self):
+        assert parse_image_path("backup.img.bak") == (None, None, "backup.img.bak")
+
+    def test_digit_filename_is_not_partition(self):
+        assert parse_image_path("disk.img:123.TXT") == ("disk.img", None, "123.TXT")
+
+    def test_internal_file_with_image_extension(self):
+        assert parse_image_path("disk.img:\\A.IMG") == ("disk.img", None, "A.IMG")
+
+
+class TestSubdirectoryExtraction:
+    """find_matching_files must return image-root-relative paths."""
+
+    def test_recursive_subdir_paths_resolvable(self, blank_ds_copy):
+        with V9KDiskImage(str(blank_ds_copy), readonly=False) as disk:
+            disk.create_directory(["SUB"])
+            disk.write_file(["SUB", "README"], b"hello")
+
+            matches = disk.find_matching_files(["SUB"], recursive=True)
+            names = {rel for rel, _ in matches}
+            assert "SUB\\README" in names
+
+            for rel, entry in matches:
+                if not entry.is_directory:
+                    assert disk.read_file(rel.split("\\")) == b"hello"
 
 
 # =============================================================================
