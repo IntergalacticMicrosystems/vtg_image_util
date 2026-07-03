@@ -16,6 +16,7 @@ from .constants import (
     ATTR_READONLY,
     ATTR_SYSTEM,
     DIR_ENTRY_SIZE,
+    FAT_BAD,
     FAT_FREE,
     SECTOR_SIZE,
 )
@@ -104,6 +105,15 @@ class FAT12Base(ABC):
         pass
 
     @property
+    def usable_clusters(self) -> int:
+        """
+        Number of clusters available for allocation. Usually equals
+        total_clusters, but may be smaller when part of the data area is
+        reserved (e.g. an IPL boot image not covered by a FAT chain).
+        """
+        return self.total_clusters
+
+    @property
     @abstractmethod
     def cluster_size(self) -> int:
         """Bytes per cluster."""
@@ -161,8 +171,8 @@ class FAT12Base(ABC):
 
         offset = cluster + (cluster // 2)  # 1.5 bytes per entry
 
-        if offset + 1 >= len(self._fat_data):
-            return FAT_FREE
+        if cluster < 0 or offset + 1 >= len(self._fat_data):
+            raise CorruptedDiskError(f"Cluster {cluster} is outside the FAT")
 
         # Read 2 bytes at offset (little-endian)
         word = self._fat_data[offset] | (self._fat_data[offset + 1] << 8)
@@ -212,15 +222,21 @@ class FAT12Base(ABC):
         while 0x002 <= cluster <= 0xFEF:
             if cluster in seen:
                 raise CorruptedDiskError(f"Circular cluster chain at {cluster}")
+            if cluster > self.total_clusters + 1:
+                raise CorruptedDiskError(f"Chain points to invalid cluster {cluster}")
             seen.add(cluster)
             chain.append(cluster)
             cluster = self.get_fat_entry(cluster)
+            if cluster == FAT_BAD:
+                raise CorruptedDiskError(
+                    f"Chain runs into bad-cluster marker after cluster {chain[-1]}"
+                )
 
         return chain
 
     def find_free_cluster(self) -> int | None:
         """Find a free cluster. Returns None if disk is full."""
-        for cluster in range(2, self.total_clusters + 2):
+        for cluster in range(2, self.usable_clusters + 2):
             if self.get_fat_entry(cluster) == FAT_FREE:
                 return cluster
         return None
@@ -231,7 +247,7 @@ class FAT12Base(ABC):
             return []
 
         free_clusters = []
-        for cluster in range(2, self.total_clusters + 2):
+        for cluster in range(2, self.usable_clusters + 2):
             if self.get_fat_entry(cluster) == FAT_FREE:
                 free_clusters.append(cluster)
                 if len(free_clusters) == num_clusters:
@@ -481,23 +497,45 @@ class FAT12Base(ABC):
             dir_cluster = None  # Root directory
 
         # Check if file already exists
+        existing = None
         entries = self.read_directory(dir_cluster)
         for entry in entries:
             if entry.name == name and entry.extension == ext:
                 if entry.is_directory:
                     raise DiskError(f"'{filename}' is a directory")
-                # Delete existing file
-                self.free_chain(entry.first_cluster)
-                self._delete_entry_by_name(dir_cluster, name, ext)
+                existing = entry
                 break
 
         # Calculate clusters needed
         num_clusters = (len(data) + self.cluster_size - 1) // self.cluster_size
-        if num_clusters == 0 and len(data) == 0:
-            num_clusters = 0
 
-        # Allocate clusters
-        clusters = self.allocate_chain(num_clusters) if num_clusters > 0 else []
+        # Free the old chain (in-memory only) so its clusters can be reused,
+        # but keep the on-disk directory entry until allocation has succeeded
+        # so a failed overwrite never destroys the original file.
+        fat_snapshot = (bytes(self._fat_data), self._fat_dirty)
+        if existing is not None and existing.first_cluster > 0:
+            self.free_chain(existing.first_cluster)
+
+        try:
+            clusters = self.allocate_chain(num_clusters) if num_clusters > 0 else []
+        except (DiskFullError, DiskError):
+            self._fat_data = bytearray(fat_snapshot[0])
+            self._fat_dirty = fat_snapshot[1]
+            raise
+
+        if existing is not None:
+            # Point of no return: remove the old directory entry. Deleting it
+            # frees a slot, so the slot search below cannot fail.
+            self._delete_entry_by_name(dir_cluster, name, ext)
+        else:
+            # Reserve a directory slot up front so a full directory doesn't
+            # leave an orphaned cluster chain in the FAT.
+            try:
+                self._find_free_dir_slot(dir_cluster)
+            except (DiskFullError, DirectoryFullError):
+                self._fat_data = bytearray(fat_snapshot[0])
+                self._fat_dirty = fat_snapshot[1]
+                raise
 
         # Write data to clusters
         data_offset = 0
@@ -651,15 +689,22 @@ class FAT12Base(ABC):
             return []
 
         # Determine base directory
-        if len(path_components) > 1 and not has_wildcards(path_components[-2]):
-            base_path = path_components[:-1]
-            pattern = last_component
-        elif has_wildcard:
+        if has_wildcard:
             base_path = path_components[:-1] if len(path_components) > 1 else []
             pattern = last_component
         else:
-            base_path = path_components
-            pattern = '*.*'
+            # No wildcard (recursive copy of a name): a directory is the
+            # base itself; a file is a pattern within its parent
+            try:
+                _, entry = self.resolve_path(path_components)
+            except FileNotFoundError:
+                return []
+            if entry is None:
+                base_path = path_components
+                pattern = '*'
+            else:
+                base_path = path_components[:-1]
+                pattern = last_component
 
         # Get base directory cluster
         if base_path:
@@ -672,6 +717,9 @@ class FAT12Base(ABC):
         else:
             dir_cluster = None
 
+        # Returned paths are relative to the image root so callers can
+        # resolve them directly (base may be a subdirectory)
+        base_prefix = '\\'.join(base_path)
         results = []
 
         if recursive:
@@ -689,7 +737,7 @@ class FAT12Base(ABC):
                     elif match_filename(pattern, entry.full_name):
                         results.append((entry_rel, entry))
 
-            recurse(dir_cluster, '')
+            recurse(dir_cluster, base_prefix)
         else:
             # Non-recursive
             entries = self.read_directory(dir_cluster)
@@ -697,7 +745,8 @@ class FAT12Base(ABC):
                 if entry.is_dot_entry or entry.is_directory:
                     continue
                 if match_filename(pattern, entry.full_name):
-                    results.append((entry.full_name, entry))
+                    entry_rel = base_prefix + '\\' + entry.full_name if base_prefix else entry.full_name
+                    results.append((entry_rel, entry))
 
         return results
 
@@ -1048,6 +1097,8 @@ class DiskImageFileMixin:
         mode = 'rb' if readonly else 'r+b'
         try:
             self._file = open(image_path, mode)
+            self._file.seek(0, 2)
+            self._image_sectors = self._file.tell() // SECTOR_SIZE
         except OSError as e:
             raise DiskError(f"Cannot open disk image: {e}")
 
@@ -1074,6 +1125,13 @@ class DiskImageFileMixin:
 
         if len(data) != SECTOR_SIZE:
             raise DiskError(f"Invalid sector size: {len(data)}")
+
+        # Never grow the image: a write past the end means corrupt geometry
+        if sector_num < 0 or sector_num >= self._image_sectors:
+            raise DiskError(
+                f"Sector {sector_num} is outside the disk image "
+                f"(0-{self._image_sectors - 1})"
+            )
 
         offset = sector_num * SECTOR_SIZE
         self._file.seek(offset)

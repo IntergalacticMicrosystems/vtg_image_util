@@ -36,12 +36,17 @@ class V9KDiskImage(DiskImageFileMixin, FAT12Base):
         self._dir_sectors = 8
         self._total_clusters = 0
 
-        # Parse boot sector
-        self._read_boot_sector()
+        try:
+            # Parse boot sector
+            self._read_boot_sector()
 
-        # Initialize base class and load FAT
-        FAT12Base.__init__(self)
-        self._load_fat()
+            # Initialize base class and load FAT
+            FAT12Base.__init__(self)
+            self._load_fat()
+        except Exception:
+            self._file.close()
+            self._file = None
+            raise
 
     def _read_boot_sector(self) -> None:
         """Parse boot sector to determine disk geometry."""
@@ -70,7 +75,6 @@ class V9KDiskImage(DiskImageFileMixin, FAT12Base):
             self._dir_sectors = 8
             if self._data_start == 0:
                 self._data_start = 13
-            self._total_clusters = 2378
         else:
             self._fat_start = 1
             self._fat_sectors = 1
@@ -78,7 +82,12 @@ class V9KDiskImage(DiskImageFileMixin, FAT12Base):
             self._dir_sectors = 8
             if self._data_start == 0:
                 self._data_start = 11
-            self._total_clusters = 1214
+
+        # Cluster count from the data area actually present in the image,
+        # clamped to what the FAT can address (clusters are numbered from 2)
+        data_sectors = max(0, self._image_sectors - self._data_start)
+        fat_capacity = (self._fat_sectors * SECTOR_SIZE * 2) // 3 - 2
+        self._total_clusters = min(data_sectors // SECTORS_PER_CLUSTER, fat_capacity)
 
     # =========================================================================
     # Abstract Properties Implementation
@@ -206,12 +215,17 @@ class IBMPCDiskImage(DiskImageFileMixin, FAT12Base):
         self._bpb: IBMPCBIOSParameterBlock | None = None
         self._open_file(image_path, readonly)
 
-        # Parse BPB
-        self._read_bpb()
+        try:
+            # Parse BPB
+            self._read_bpb()
 
-        # Initialize base class and load FAT
-        FAT12Base.__init__(self)
-        self._load_fat()
+            # Initialize base class and load FAT
+            FAT12Base.__init__(self)
+            self._load_fat()
+        except Exception:
+            self._file.close()
+            self._file = None
+            raise
 
     def _read_bpb(self) -> None:
         """Parse BPB from boot sector."""

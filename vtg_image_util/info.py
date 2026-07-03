@@ -37,8 +37,9 @@ def get_disk_info(disk: Any) -> dict[str, Any]:
 
 def _get_fat12_disk_info(disk: FAT12Base) -> dict[str, Any]:
     """Get information for a FAT12 disk or partition."""
-    # Calculate cluster usage from FAT
-    total_clusters = disk.total_clusters
+    # Calculate cluster usage from FAT. Use usable_clusters so reserved
+    # areas (e.g. an IPL image in unallocated space) are not counted as free.
+    total_clusters = disk.usable_clusters
     free_clusters = 0
     used_clusters = 0
     bad_clusters = 0

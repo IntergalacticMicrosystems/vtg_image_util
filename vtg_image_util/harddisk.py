@@ -67,13 +67,19 @@ class V9KPartition(FAT12Base):
         self._dir_start = self._fat_start + (2 * self._fat_sectors)  # After both FAT copies
         self._data_start = self._dir_start + self._dir_sectors
 
-        # Calculate total clusters
+        # Calculate total clusters, clamped to what the FAT can address
         volume_data_sectors = volume_label.volume_capacity - (1 + 2 * self._fat_sectors + self._dir_sectors)
-        self._total_clusters = volume_data_sectors // self._sectors_per_cluster
+        fat_capacity = (self._fat_sectors * SECTOR_SIZE * 2) // 3 - 2
+        self._total_clusters = min(
+            volume_data_sectors // self._sectors_per_cluster, fat_capacity
+        )
 
         # Initialize base class and load FAT
         FAT12Base.__init__(self)
         self._load_fat()
+
+        # Allocation limit; may be clamped below to protect the IPL area
+        self._usable_clusters = self._total_clusters
 
         # CRITICAL: Protect the IPL (boot code) area from being overwritten.
         # The IPL address is relative to volume start. Two layouts exist:
@@ -94,11 +100,12 @@ class V9KPartition(FAT12Base):
                 if any(self.get_fat_entry(c) == FAT_FREE
                        for c in range(first_cluster, last_cluster + 1)):
                     # IPL clusters are not allocated in the FAT, so limit the
-                    # usable cluster range to end before the IPL.
+                    # allocatable cluster range to end before the IPL. The
+                    # full range stays addressable for reading existing files.
                     usable_data_sectors = max(0, ipl_start - metadata_sectors)
                     max_safe_clusters = usable_data_sectors // self._sectors_per_cluster
-                    if max_safe_clusters < self._total_clusters:
-                        self._total_clusters = max_safe_clusters
+                    if max_safe_clusters < self._usable_clusters:
+                        self._usable_clusters = max_safe_clusters
 
     # =========================================================================
     # Layout Detection
@@ -120,7 +127,25 @@ class V9KPartition(FAT12Base):
         fat_bytes = (estimated_clusters * 3 + 1) // 2
         max_fat_sectors = max(1, (fat_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE)
 
-        # Scan from offset 1 to find where directory starts
+        # Preferred method: the FAT starts with the media descriptor header
+        # (0xF8 0xFF 0xFF) and the second FAT copy is an identical sector at
+        # offset 1 + fat_sectors. Matching the copies pins the layout even on
+        # a freshly formatted partition whose directory is all zeros.
+        try:
+            fat_first = self.disk.read_sector(self._volume_start + 1)
+        except Exception:
+            fat_first = b''
+        if len(fat_first) >= 3 and fat_first[0] >= 0xF0 and fat_first[1] == 0xFF:
+            for candidate in range(1, max_fat_sectors + 1):
+                try:
+                    copy2_first = self.disk.read_sector(
+                        self._volume_start + 1 + candidate)
+                except Exception:
+                    break
+                if copy2_first == fat_first:
+                    return candidate
+
+        # Fallback: scan from offset 1 to find where directory starts
         # Directory will be after 2 FAT copies, so scan up to max_fat_sectors * 2 + some margin
         max_scan = min(max_fat_sectors * 2 + 10, 100)
 
@@ -220,6 +245,12 @@ class V9KPartition(FAT12Base):
 
     def write_sector(self, sector_num: int, data: bytes) -> None:
         """Write a single sector by delegating to parent disk."""
+        volume_end = self._volume_start + self.volume_label.volume_capacity
+        if not (self._volume_start <= sector_num < volume_end):
+            raise DiskError(
+                f"Sector {sector_num} is outside partition "
+                f"{self.partition_index} ({self._volume_start}-{volume_end - 1})"
+            )
         self.disk.write_sector(sector_num, data)
 
     # =========================================================================
@@ -253,6 +284,10 @@ class V9KPartition(FAT12Base):
     @property
     def total_clusters(self) -> int:
         return self._total_clusters
+
+    @property
+    def usable_clusters(self) -> int:
+        return self._usable_clusters
 
     @property
     def sectors_per_cluster(self) -> int:
@@ -306,8 +341,15 @@ class V9KHardDiskImage:
             except OSError as e:
                 raise DiskError(f"Cannot open disk image: {e}")
 
-        self._read_physical_label()
-        self._load_partitions()
+        try:
+            self._file.seek(0, 2)
+            self._image_sectors = self._file.tell() // SECTOR_SIZE
+            self._read_physical_label()
+            self._load_partitions()
+        except Exception:
+            self._file.close()
+            self._file = None
+            raise
 
     def _read_physical_label(self) -> None:
         """Parse the physical disk label from sector 0."""
@@ -355,6 +397,13 @@ class V9KHardDiskImage:
 
         if len(data) != SECTOR_SIZE:
             raise DiskError(f"Invalid sector size: {len(data)}")
+
+        # Never grow the image: a write past the end means corrupt geometry
+        if sector_num < 0 or sector_num >= self._image_sectors:
+            raise DiskError(
+                f"Sector {sector_num} is outside the disk image "
+                f"(0-{self._image_sectors - 1})"
+            )
 
         offset = sector_num * SECTOR_SIZE
         self._file.seek(offset)
