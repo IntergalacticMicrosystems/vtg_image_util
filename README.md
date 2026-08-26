@@ -2,6 +2,11 @@
 
 A cross-platform utility for reading and writing Victor 9000 and IBM PC floppy and hard disk images.
 
+## Quick Start
+
+GUI and command line version exes for Windows: 
+[windows-exe.zip]([https://github.com/IntergalacticMicrosystems/vtg_image_util](https://github.com/IntergalacticMicrosystems/vtg_image_util/raw/refs/heads/main/windows-exe.zip))
+
 ## Features
 
 - **Victor 9000 Support**
