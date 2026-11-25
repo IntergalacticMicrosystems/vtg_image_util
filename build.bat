@@ -2,6 +2,7 @@
 REM Build script for vtg_image_util
 REM Creates both CLI and GUI executables
 REM Requires: pip install pyinstaller wxpython
+REM Usage: build.bat [/nopause]   (/nopause: no keypress at the end, for unattended builds)
 
 setlocal enabledelayedexpansion
 
@@ -87,4 +88,4 @@ if exist "windows-exe.zip" (
 echo.
 echo Build complete!
 echo.
-pause
+if /i not "%~1"=="/nopause" pause

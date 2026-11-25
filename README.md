@@ -274,6 +274,10 @@ Output in `dist/`:
 - `vtg_image_util.exe` - CLI version (console)
 - `vtg_image_util_gui.exe` - GUI version (windowed)
 
+Or run `build.bat`, which also packs both into `windows-exe.zip`. It waits
+for a keypress at the end; `build.bat /nopause` skips that for unattended
+builds.
+
 ### macOS
 
 ```bash
