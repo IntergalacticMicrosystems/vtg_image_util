@@ -1298,6 +1298,58 @@ class TestSubdirectoryExtraction:
                     assert disk.read_file(rel.split("\\")) == b"hello"
 
 
+class TestVictorFloppyCreate:
+    """create -t victor-ss/-ds must write the label Victor FORMAT writes;
+    Victor DOS gives "Read fault" on any other label."""
+
+    # Sector 0 of a single-sided data disk formatted by Victor FORMAT
+    # (bytes 0x00-0x81; the rest of the sector is zero)
+    FORMAT_SS_LABEL = bytes.fromhex(
+        '00' * 0x1A + '0002' + '00' * 6 + '10000000'
+        '0411013e49535d67717b868a8a8a8a8a8a8a'
+        '030f1a252f3b465261616161616161'
+        '131211100f0e0d0c0b' + '00' * 0x30 + '7f0b'
+    ).ljust(SECTOR_SIZE, b'\x00')
+
+    def _create(self, tmp_path, sides):
+        from vtg_image_util.creator import create_victor_floppy
+        path = tmp_path / f"{sides}.img"
+        create_victor_floppy(str(path), sides)
+        return path.read_bytes()
+
+    def test_single_sided_label_matches_format(self, tmp_path):
+        data = self._create(tmp_path, 'single')
+        assert data[:SECTOR_SIZE] == self.FORMAT_SS_LABEL
+        assert len(data) == 1224 * SECTOR_SIZE
+
+    def test_double_sided_label(self, tmp_path):
+        data = self._create(tmp_path, 'double')
+        label = data[:SECTOR_SIZE]
+        # Same as single-sided except the double-sided flag and checksum
+        expected = bytearray(self.FORMAT_SS_LABEL)
+        expected[0x20] = 0x01
+        expected[0x80:0x82] = struct.pack('<H', 0x0B80)
+        assert label == bytes(expected)
+        # 2391 sectors: side 1 has fewer sectors per track (MAME rejects others)
+        assert len(data) == 2391 * SECTOR_SIZE
+
+    @pytest.mark.parametrize("sides", ['single', 'double'])
+    def test_label_checksum(self, tmp_path, sides):
+        label = self._create(tmp_path, sides)[:SECTOR_SIZE]
+        assert struct.unpack_from('<H', label, 0x80)[0] == sum(label[:0x80]) & 0xFFFF
+
+    @pytest.mark.parametrize("sides,clusters", [('single', 303), ('double', 594)])
+    def test_created_disk_is_usable(self, tmp_path, sides, clusters):
+        self._create(tmp_path, sides)
+        path = str(tmp_path / f"{sides}.img")
+        assert detect_image_type(path) == 'floppy'
+        with V9KDiskImage(path, readonly=False) as disk:
+            assert disk.total_clusters == clusters
+            disk.write_file(["TEST.TXT"], b"hello")
+        with V9KDiskImage(path) as disk:
+            assert disk.read_file(["TEST.TXT"]) == b"hello"
+
+
 # =============================================================================
 # Run Tests
 # =============================================================================

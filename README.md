@@ -325,7 +325,11 @@ For distribution, consider creating an AppImage or packaging for your distributi
 ### Victor 9000 Floppy Format
 - FAT12 filesystem
 - 4 sectors per cluster (2048 bytes)
-- Single-sided: ~600KB (303 clusters), Double-sided: ~1.2MB (594 clusters)
+- Single-sided: ~600KB (1224 sectors, 303 clusters), Double-sided: ~1.2MB
+  (2391 sectors, 594 clusters)
+- `create` writes the data-disk label Victor FORMAT writes, including the
+  label checksum at offset 0x80 that Victor DOS checks
+  (see `format_docs/victor_boot_sector_layout.md`)
 - Variable track geometry (GCR encoding on real hardware)
 - Sector writes are bounds-checked so the image can never grow past
   the media size

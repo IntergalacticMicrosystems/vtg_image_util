@@ -25,18 +25,18 @@ V9K_FLOPPY_PARAMS = {
         'dir_start': 3,
         'dir_sectors': 8,
         'data_start': 11,
-        'total_clusters': 1214,
+        'total_clusters': 303,
         'flags': 0x00,               # Bit 0 = 0 for single-sided
     },
     'double': {
-        'total_sectors': 2448,       # Double-sided
+        'total_sectors': 2391,       # Double-sided (side 1 has fewer sectors per track)
         'fat_start': 1,
         'fat_sectors': 2,
         'fat_copies': 2,
         'dir_start': 5,
         'dir_sectors': 8,
         'data_start': 13,
-        'total_clusters': 2378,
+        'total_clusters': 594,
         'flags': 0x01,               # Bit 0 = 1 for double-sided
     },
 }
@@ -196,18 +196,30 @@ def create_ibm_floppy(
         raise DiskError(f"Failed to create disk image: {e}")
 
 
+# Speed table (0x26), zone table (0x38) and sectors-per-track table (0x47),
+# copied from disks formatted by Victor FORMAT (identical for both sides).
+V9K_LABEL_TABLES = bytes.fromhex(
+    '0411013e49535d67717b868a8a8a8a8a8a8a'    # 0x26-0x37 speed table
+    '030f1a252f3b465261616161616161'           # 0x38-0x46 zone table (high track)
+    '131211100f0e0d0c0b'                       # 0x47-0x4F sectors per track
+)
+
+
 def _create_v9k_boot_sector(params: dict) -> bytes:
-    """Create a Victor 9000 boot sector."""
+    """Create a Victor 9000 data-disk label, as written by Victor FORMAT."""
     boot = bytearray(SECTOR_SIZE)
 
-    # Jump instruction (not bootable, but standard)
-    boot[0:3] = b'\xEB\x3C\x90'  # JMP short + NOP
+    # 0x00-0x05 (system disc ID, load address, length) and 0x1E (boot start)
+    # stay zero: this is a data disk, not a system disk.
+    struct.pack_into('<H', boot, 0x1A, SECTOR_SIZE)     # Sector size
+    # 0x1C data start stays 0, as FORMAT writes it
+    struct.pack_into('<H', boot, 0x20, params['flags'])  # Flags (bit 0 = double-sided)
+    boot[0x22] = 0x10                                   # Disc type: MS-DOS
+    boot[0x26:0x50] = V9K_LABEL_TABLES
 
-    # Victor-specific fields
-    struct.pack_into('<H', boot, 26, SECTOR_SIZE)      # Sector size
-    struct.pack_into('<H', boot, 28, params['data_start'])  # Data start sector
-    struct.pack_into('<H', boot, 32, params['flags'])  # Flags (bit 0 = double-sided)
-    boot[34] = 0x01  # Disc type
+    # 0x80: 16-bit sum of label bytes 0x00-0x7F. Victor DOS rejects the disk
+    # ("Read fault") when it does not match.
+    struct.pack_into('<H', boot, 0x80, sum(boot[:0x80]) & 0xFFFF)
 
     return bytes(boot)
 
@@ -303,12 +315,12 @@ def get_supported_formats() -> dict:
             'single': {
                 'description': 'Victor 9000 single-sided floppy',
                 'capacity': '~600 KB',
-                'clusters': 1214,
+                'clusters': 303,
             },
             'double': {
                 'description': 'Victor 9000 double-sided floppy',
                 'capacity': '~1.2 MB',
-                'clusters': 2378,
+                'clusters': 594,
             },
         },
         'ibm_floppy': {
